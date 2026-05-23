@@ -1,35 +1,40 @@
 {
-    "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
     "name": "cc-antigravity-plugin",
-    "description": "Antigravity CLI (AGY) integration for Claude Code with shared runtime support for Codex",
+    "description": "Antigravity CLI (AGY) integration for Claude Code with model selection, conversation continuity, and shared runtime support",
     "owner": {
-        "name": "thepushkarp",
-        "email": ""
+        "name": "Allan Harlen",
+        "email": "allanharlen@gmail.com"
     },
     "plugins": [
         {
             "name": "cc-antigravity-plugin",
-            "description": "Invoke Antigravity CLI (AGY) for long-context code exploration, architecture review, codebase analysis, and structured data synthesis",
-            "version": "2.0.0",
+            "displayName": "Antigravity CLI Integration",
+            "description": "Invoke Antigravity CLI (AGY) for long-context code exploration, architecture review, and codebase analysis with model selection and conversation continuity",
+            "version": "3.0.0",
             "author": {
-                "name": "thepushkarp"
+                "name": "Allan Harlen",
+                "email": "allanharlen@gmail.com"
             },
             "source": "./",
             "category": "integrations",
+            "tags": [
+                "antigravity",
+                "agy",
+                "google",
+                "gemini",
+                "long-context",
+                "code-exploration"
+            ],
             "keywords": [
                 "antigravity",
                 "agy",
                 "google",
                 "code-exploration",
-                "analysis",
-                "long-context",
-                "documentation",
-                "writing",
-                "codex",
-                "claude-code"
+                "analysis"
             ],
             "homepage": "https://github.com/AllanHarlen/cc-antigravity-plugin",
-            "repository": "https://github.com/AllanHarlen/cc-antigravity-plugin"
+            "repository": "https://github.com/AllanHarlen/cc-antigravity-plugin",
+            "license": "MIT"
         }
     ]
 }

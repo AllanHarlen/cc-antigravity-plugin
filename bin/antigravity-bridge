@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+
+import { main } from "../scripts/antigravity-bridge.js";
+
+const exitCode = await main();
+process.exit(exitCode);

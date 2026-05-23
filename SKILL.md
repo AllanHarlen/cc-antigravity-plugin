@@ -6,13 +6,11 @@ allowed-tools: Bash, Glob, Read
 
 # Antigravity CLI Integration
 
-Antigravity CLI (AGY) is the large-context handoff in this repository. Use it when the
-task is about the shape of a system, a broad slice of a repo, or a mixed text
-dataset that should be synthesized in one pass.
+Antigravity CLI (AGY) is the large-context handoff in this repository. Use it
+when the task is about the shape of a system, a broad slice of a repo, or a
+mixed text dataset that should be synthesized in one pass.
 
 ## When to Use Antigravity
-
-### Ideal Cases
 
 | Scenario | Why Antigravity Fits |
 |----------|----------------------|
@@ -23,13 +21,8 @@ dataset that should be synthesized in one pass.
 | Documentation generation | Synthesizes behavior from many files |
 | Structured data review | Reads JSON, YAML, TOML, CSV, Markdown, and code together |
 
-### Not Ideal
-
-| Scenario | Why |
-|----------|-----|
-| Quick single-file edits | The handoff adds latency you do not need |
-| Tight interactive debugging | Better handled directly by the host model |
-| Narrow tasks with no cross-file context | Antigravity adds little value |
+Avoid Antigravity for quick single-file edits, tight interactive debugging, or
+narrow tasks with no cross-file context.
 
 ## Host Entry Points
 
@@ -43,7 +36,7 @@ Use the slash command:
 /cc-antigravity-plugin:antigravity --files "schemas/**/*.json" <task>
 ```
 
-Claude can also spawn `antigravity-agent` when the task obviously benefits from a
+Claude can also spawn `antigravity-agent` when the task benefits from a
 large-context pass.
 
 ### Codex
@@ -51,50 +44,54 @@ large-context pass.
 - Mention the skill explicitly with `$antigravity-integration`.
 - Or ask Codex to use the Antigravity integration for a large analysis task.
 
-Codex reads this skill definition directly when the repository is installed as a
-user-level skill.
-
 ## Shared Runtime Contract
 
 Always prefer the shared bridge script over hand-written `agy` commands:
 
 ```bash
-node scripts/antigravity-bridge.js [options] <task>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] -- "<task>"
 ```
 
-The bridge owns:
-- argument parsing
-- directory and file ingestion
-- structured prompt assembly
-- Antigravity CLI invocation
+The bridge owns argument parsing, file ingestion, prompt assembly, model
+override, conversation flags, and AGY invocation.
 
-Use:
-- `--dirs <path,...>` for broad module trees
-- `--files <glob,...>` for targeted globs and mixed data formats
-- `--print-command` when you need to inspect the resolved agy command
-- Note: `--model` is accepted but not forwarded to agy; AGY headless mode does not expose a model flag
-- Note: `--format json` is not supported; AGY headless mode always returns text
+## Bridge Options
+
+| Option | Behavior |
+|--------|----------|
+| `--dirs <path,...>` | Inline directories into the bridge prompt |
+| `--files <glob,...>` | Inline targeted globs and mixed data formats |
+| `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
+| `--model <name>` | Temporarily set the AGY model and restore settings after execution |
+| `--continue`, `-c` | Continue the most recent AGY conversation |
+| `--conversation <id>` | Resume a specific AGY conversation |
+| `--timeout <duration>` | Forward `--print-timeout` to AGY |
+| `--sandbox` | Enable AGY sandbox mode |
+| `--skip-permissions` | Forward AGY `--dangerously-skip-permissions` |
+| `--print-command` | Inspect the resolved AGY command without running it |
+
+`--format json` is not supported; AGY headless mode returns text.
 
 ## Good Patterns
 
 ### Architecture
 
 ```bash
-node scripts/antigravity-bridge.js --dirs src,docs \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src,docs \
   "Explain the architecture and cite the key files."
 ```
 
 ### Refactor impact
 
 ```bash
-node scripts/antigravity-bridge.js --dirs src \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --add-dir src --continue \
   "Analyze the impact of refactoring the auth module. Include affected files and migration steps."
 ```
 
 ### Structured data
 
 ```bash
-node scripts/antigravity-bridge.js --files "schemas/**/*.json,data/**/*.csv" \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --files "schemas/**/*.json,data/**/*.csv" \
   "Summarize the data contracts and identify breaking changes."
 ```
 
@@ -102,7 +99,8 @@ node scripts/antigravity-bridge.js --files "schemas/**/*.json,data/**/*.csv" \
 
 | Issue | Solution |
 |-------|----------|
-| Authentication error | Launch `agy` once interactively; sign in via keyring or browser. Use `/logout` inside the TUI to clear cached credentials. |
+| Authentication error | Launch `agy` once interactively and sign in. |
 | AGY missing on PATH | macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash`  Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
-| Rate limiting | Retry with a narrower task or smaller context set |
-| Token pressure | Reduce the number of inlined files |
+| Model override failed | Set the model in AGY with `/model`, then retry without `--model`. |
+| Rate limiting | Retry with a narrower task or smaller context set. |
+| Token pressure | Reduce the number of inlined files. |

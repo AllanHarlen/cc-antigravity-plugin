@@ -1,68 +1,35 @@
 # cc-antigravity-plugin
 
-Dá ao Claude Code e ao Codex uma **visão de satélite de contexto longo** sobre qualquer base de código, roteando tarefas de análise pelo [Antigravity CLI (AGY)](https://antigravity.google).
+Give Claude Code and Codex a long-context Antigravity CLI (AGY) handoff for
+architecture review, refactor impact analysis, documentation synthesis, and
+mixed text-data analysis.
 
-O Claude Code é excelente para edições precisas arquivo por arquivo. O Antigravity é excelente para ler uma base de código inteira — ou uma fatia grande dela — em uma única passagem e sintetizar descobertas em dezenas de arquivos ao mesmo tempo. Este plugin conecta os dois para que você possa continuar no Claude Code e delegar qualquer tarefa de análise ampla ao Antigravity com um único comando.
+Claude Code is strongest for precise local edits. AGY is useful when a broad
+slice of a repository should be read and synthesized in one pass. This plugin
+connects both through a shared Node.js bridge.
 
----
+## Prerequisites
 
-## Quando usar
-
-| Situação | Por que o Antigravity resolve |
-|----------|-------------------------------|
-| "Qual é a arquitetura deste projeto?" | Precisa de um mapa cross-file, não de leitura linha por linha |
-| "O que quebra se eu refatorar o módulo de auth?" | Rastreia chamadores e dependências entre módulos |
-| "Faça uma auditoria de segurança do fluxo de pagamento" | Segue dados entre múltiplos arquivos e serviços |
-| "Gere documentação para este serviço" | Sintetiza comportamento a partir de muitos arquivos-fonte |
-| "Resuma as breaking changes nesses schemas JSON" | Lê dados estruturados lado a lado em uma única passagem |
-| "Acabei de clonar este repo — me oriente" | Produz um mapa de alto nível mais rápido do que arquivo por arquivo |
-
-**Não é a ferramenta certa para:** edições em arquivo único, loops de debug, ou qualquer tarefa sem componente cross-file relevante — o roundtrip ao AGY adiciona latência desnecessária nesses casos.
-
----
-
-## Pré-requisitos
-
-**1. Instalar o Antigravity CLI**
+Install and authenticate AGY:
 
 ```bash
 # macOS / Linux
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 
-# Windows (PowerShell)
+# Windows PowerShell
 irm https://antigravity.google/cli/install.ps1 | iex
-```
 
-**2. Autenticar**
-
-Execute `agy` uma vez de forma interativa para concluir o login com Google:
-
-```bash
 agy
-```
-
-**3. Verificar que funciona**
-
-```bash
 agy --print "what is 2+2"
 ```
 
----
-
-## Instalação
+## Install
 
 ### Claude Code
 
 ```bash
 /plugin marketplace add AllanHarlen/cc-antigravity-plugin
 /plugin install cc-antigravity-plugin@cc-antigravity-plugin
-/reload-plugins
-```
-
-Para atualizar:
-
-```bash
-/plugin marketplace update cc-antigravity-plugin
 /reload-plugins
 ```
 
@@ -74,181 +41,119 @@ git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
   ~/.agents/skills/cc-antigravity-plugin
 ```
 
-Reinicie o Codex após clonar. Para atualizar:
+Restart Codex after cloning.
+
+## Usage
 
 ```bash
-git -C ~/.agents/skills/cc-antigravity-plugin pull
+/cc-antigravity-plugin:antigravity <task>
+/cc-antigravity-plugin:antigravity --dirs src,docs <task>
+/cc-antigravity-plugin:antigravity --files "schemas/**/*.json,data/**/*.csv" <task>
+/cc-antigravity-plugin:antigravity --add-dir src <task>
 ```
 
----
-
-## Como usar
-
-### Claude Code — slash command
-
-```bash
-/cc-antigravity-plugin:antigravity <tarefa>
-/cc-antigravity-plugin:antigravity --dirs <caminhos> <tarefa>
-/cc-antigravity-plugin:antigravity --files <globs> <tarefa>
-```
-
-### Claude Code — subagente
-
-O Claude Code também pode acionar o `antigravity-agent` automaticamente quando uma tarefa se beneficia claramente de uma passagem de contexto longo (revisão de arquitetura, impacto de refatoração, auditoria de segurança). O agente seleciona o escopo correto e executa o bridge por conta própria.
-
-### Codex — skill
+Codex can use the root skill with:
 
 ```text
 $antigravity-integration
 ```
 
-Ou peça ao Codex para usar a integração Antigravity em uma tarefa de análise ampla.
+## Options
 
----
+| Option | Description |
+|--------|-------------|
+| `--dirs <path,...>` | Recursively inline directories into the bridge prompt |
+| `--files <glob,...>` | Inline files that match comma-separated glob patterns |
+| `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
+| `--model <name>` | Temporarily set the AGY model and restore settings afterward |
+| `--continue`, `-c` | Continue the most recent AGY conversation |
+| `--conversation <id>` | Resume a specific AGY conversation |
+| `--timeout <duration>` | Forward `--print-timeout` to AGY, for example `3m` |
+| `--sandbox` | Enable AGY sandbox mode |
+| `--skip-permissions` | Forward AGY `--dangerously-skip-permissions` |
+| `--max-files <n>` | Maximum files to inline, default `40` |
+| `--max-file-bytes <n>` | Maximum bytes per inlined file, default `32768` |
+| `--print-command` | Print the resolved `agy` command without running it |
 
-## Opções
+`--format json` is not supported because AGY headless print mode returns text.
 
-| Opção | Descrição |
-|-------|-----------|
-| `--dirs <caminho,...>` | Injeta recursivamente um ou mais diretórios. Separe múltiplos caminhos com vírgula: `--dirs src,docs,lib` |
-| `--files <glob,...>` | Injeta arquivos que correspondem a padrões glob. Suporta múltiplos globs: `--files "**/*.json,data/**/*.csv"` |
-| `--max-files <n>` | Número máximo de arquivos injetados (padrão: 40). Aumente para varreduras mais amplas, reduza para ficar dentro dos limites do AGY. |
-| `--max-file-bytes <n>` | Tamanho máximo por arquivo em bytes (padrão: 32768). Arquivos maiores são truncados e sinalizados no inventário. |
-| `--print-command` | Imprime o comando `agy` resolvido sem executá-lo. Útil para depurar o escopo antes de rodar. |
-| `--model <nome>` | Aceito por compatibilidade de API, mas não repassado ao AGY. Configure o modelo pelas configurações do AGY. |
-
-**Guia de escopo:**
-- `--dirs` — áreas amplas de módulo ou serviço onde você quer contexto completo
-- `--files` — globs precisos ou fontes de dados mistas (JSON + CSV + Markdown juntos)
-- Use os dois quando precisar de contexto amplo de código junto com arquivos de dados específicos
-
----
-
-## Exemplos
-
-### Revisão de arquitetura
+## Examples
 
 ```bash
 /cc-antigravity-plugin:antigravity --dirs src,docs \
-  "Explique a arquitetura. Identifique os módulos principais, suas responsabilidades e o fluxo de dados entre eles."
+  "Explain the architecture. Cite key files and data flows."
 ```
-
-### Análise de impacto de refatoração
 
 ```bash
-/cc-antigravity-plugin:antigravity --dirs src \
-  "Analise o impacto de refatorar o módulo de auth. Liste os arquivos afetados, call sites quebrados e os passos de migração."
+/cc-antigravity-plugin:antigravity --add-dir src --model gemini-2.5-flash \
+  "Analyze the refactor impact of the auth module."
 ```
-
-### Auditoria de segurança
 
 ```bash
-/cc-antigravity-plugin:antigravity --dirs src \
-  "Audite o fluxo de pagamento em busca de problemas de segurança. Foco em validação de entrada, verificações de autenticação e exposição de dados."
+/cc-antigravity-plugin:antigravity --continue --timeout 5m \
+  "Summarize the migration plan from the previous answer."
 ```
-
-### Revisão de mudanças em schemas
 
 ```bash
-/cc-antigravity-plugin:antigravity --files "schemas/**/*.json,migrations/**/*.sql" \
-  "Resuma as breaking changes entre esses schemas e migrations. Sinalize campos removidos ou mudanças de tipo."
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src --print-command -- "analyze auth"
 ```
 
-### Orientação em codebase novo
+## How It Works
 
-```bash
-/cc-antigravity-plugin:antigravity --dirs . \
-  "Acabei de entrar neste projeto. Me dê uma orientação de 10 minutos: estrutura, arquivos-chave, fluxos principais e pontos de atenção."
-```
+The shared bridge at `scripts/antigravity-bridge.js`:
 
-### Depurar escopo antes de executar
+1. Parses bridge flags.
+2. Resolves `--dirs` and `--files` without Node 22-only glob APIs.
+3. Filters ignored paths and binary files.
+4. Builds a structured prompt with inventory, inline payloads, task, and constraints.
+5. Maps AGY-native flags such as `--add-dir`, `--continue`, `--conversation`,
+   `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout`.
+6. Applies `--model` by temporarily updating `~/.gemini/antigravity-cli/settings.json`.
+7. Runs AGY through `node-pty` when available and streams output as it arrives,
+   with a `spawnSync` fallback.
 
-```bash
-node scripts/antigravity-bridge.js --dirs src --print-command "analisar auth"
-# imprime o comando agy resolvido sem executá-lo
-```
-
----
-
-## Como funciona
-
-Tanto o Claude Code quanto o Codex roteiam pelo bridge compartilhado em
-`scripts/antigravity-bridge.js`:
-
-```
-/cc-antigravity-plugin:antigravity --dirs src "analisar auth"
-        │
-        ▼
-scripts/antigravity-bridge.js
-  1. Resolve --dirs e --files em uma lista de arquivos ordenada e deduplicada
-  2. Filtra binários e caminhos ignorados (node_modules, dist, .git, …)
-  3. Trunca arquivos maiores que --max-file-bytes e os sinaliza no inventário
-  4. Monta um prompt estruturado:
-       <context_inventory>  ← lista de arquivos com tamanhos e flags de truncamento
-       <context_files>      ← conteúdo inline dos arquivos (closing tags escapadas)
-       <task>               ← sua pergunta
-       <constraints>        ← regras de citação e honestidade para o AGY
-  5. Executa: agy --print <prompt>
-        │
-        ▼
-  6. No Windows: captura output via ConPTY (node-pty) com timeout de 120s
-     Em outras plataformas: fallback via spawnSync
-  7. Remove sequências ANSI, escreve output UTF-8 limpo no stdout
-        │
-        ▼
-Claude Code recebe a análise e apresenta para você
-```
-
----
-
-## Estrutura do repositório
+## Repository Layout
 
 ```text
 cc-antigravity-plugin/
 ├── .claude-plugin/
-│   ├── marketplace.json            ← metadados do registro de plugins
-│   └── plugin.json                 ← manifesto do plugin
+│   ├── marketplace.json
+│   └── plugin.json
 ├── agents/
-│   ├── antigravity-agent.md        ← definição do subagente do Claude Code
-│   └── openai.yaml                 ← metadados da skill para o Codex
+│   └── antigravity-agent.md
+├── bin/
+│   └── antigravity-bridge
 ├── commands/
-│   └── antigravity.md              ← comando /cc-antigravity-plugin:antigravity
+│   └── antigravity.md
+├── hooks/
+│   └── hooks.json
 ├── scripts/
-│   └── antigravity-bridge.js       ← runtime compartilhado (Node.js, ESM)
+│   ├── antigravity-bridge.js
+│   └── check-agy.js
 ├── tests/
-│   ├── antigravity-bridge.test.js  ← testes unitários: parser, coletor, prompt builder
-│   └── antigravity-main.test.js    ← testes de integração: main() via injeção de dependência
-├── SKILL.md                        ← definição da skill para o Codex
+│   ├── antigravity-bridge.test.js
+│   └── antigravity-main.test.js
+├── SKILL.md
+├── LICENSE
 └── package.json
 ```
 
----
-
-## Desenvolvimento
+## Development
 
 ```bash
-npm test          # executa os 42 testes
+npm test
 ```
 
-Os testes cobrem `parseCliArgs`, `collectContextFiles`, `buildAntigravityPrompt`,
-`buildAntigravityArgs`, `stripAnsi` e `main()` (via injeção de dependência —
-nenhum processo AGY real é iniciado durante os testes).
+## Troubleshooting
 
----
+| Problem | Solution |
+|---------|----------|
+| Authentication error | Run `agy` interactively and sign in. |
+| `agy` not found | Re-run the AGY installer and make sure the binary is on PATH. |
+| Model override failed | Set the model inside AGY with `/model`, then retry without `--model`. |
+| Token pressure | Reduce `--dirs`, narrow `--files`, or lower `--max-files`. |
+| Timeout | Increase `--timeout`, reduce context, or tighten the task. |
 
-## Solução de problemas
-
-| Problema | Solução |
-|----------|---------|
-| Erro de autenticação | Execute `agy` uma vez interativamente para concluir o login com Google. Use `/logout` dentro da TUI do AGY para limpar credenciais antigas. |
-| `agy` não encontrado no PATH | Execute novamente o instalador: macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash` · Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
-| Override de modelo ignorado | `--model` é aceito mas não repassado. Configure o modelo via `~/.gemini/antigravity-cli/settings.json`. |
-| Resposta truncada ou vazia | Reduza o escopo: menos `--dirs`, globs mais específicos em `--files`, ou diminua `--max-files`. |
-| Bridge trava | O AGY tem timeout de 120s. Se disparar, verifique autenticação e rede. Execute `agy --print "test"` diretamente para isolar o problema. |
-| Permissão negada ao iniciar `agy` | Verifique que o binário é executável: `chmod +x $(which agy)`. |
-
----
-
-## Licença
+## License
 
 MIT

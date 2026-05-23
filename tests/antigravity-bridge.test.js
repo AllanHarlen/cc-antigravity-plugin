@@ -9,7 +9,10 @@ import {
   buildAntigravityPrompt,
   collectContextFiles,
   parseCliArgs,
+  resolveAgyExe,
+  spawnViaConPty,
   stripAnsi,
+  withModelOverride,
 } from "../scripts/antigravity-bridge.js";
 
 test("parseCliArgs parses model, dirs, files, and positional task", () => {
@@ -30,8 +33,14 @@ test("parseCliArgs parses model, dirs, files, and positional task", () => {
   assert.deepEqual(parsed, {
     model: "gemini-2.5-pro",
     dirs: ["src", "lib"],
+    addDirs: [],
     files: ["**/*.json", "docs/**/*.md"],
     format: "text",
+    timeout: undefined,
+    continueConversation: false,
+    conversationId: undefined,
+    sandbox: false,
+    skipPermissions: false,
     maxFiles: 40,
     maxFileBytes: 32768,
     printCommand: false,
@@ -107,13 +116,33 @@ test("buildAntigravityPrompt renders task, inventory, and file payloads", () => 
 test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {
   const args = buildAntigravityArgs({
     prompt: "<task>Analyze</task>",
+    timeout: "3m",
+    continueConversation: true,
+    conversationId: "abc123",
+    addDirs: ["src", "docs"],
+    sandbox: true,
+    skipPermissions: true,
   });
 
-  assert.deepEqual(args, ["--print", "<task>Analyze</task>"]);
+  assert.deepEqual(args, [
+    "--continue",
+    "--conversation",
+    "abc123",
+    "--add-dir",
+    "src",
+    "--add-dir",
+    "docs",
+    "--sandbox",
+    "--dangerously-skip-permissions",
+    "--print",
+    "<task>Analyze</task>",
+    "--print-timeout",
+    "3m",
+  ]);
 });
 
 test("buildAntigravityArgs does not forward model or format to AGY", () => {
-  const args = buildAntigravityArgs({ prompt: "x" });
+  const args = buildAntigravityArgs({ prompt: "x", model: "gemini-2.5-pro", format: "json" });
   assert.equal(args.length, 2);
   assert.ok(!args.some((a) => a.startsWith("--model") || a.startsWith("--format")));
 });
@@ -184,6 +213,30 @@ test("parseCliArgs --help sets help true without requiring task", () => {
 test("parseCliArgs --print-command sets printCommand true", () => {
   const parsed = parseCliArgs(["--print-command", "some task"]);
   assert.equal(parsed.printCommand, true);
+});
+
+test("parseCliArgs parses AGY passthrough and conversation flags", () => {
+  const parsed = parseCliArgs([
+    "--add-dir",
+    "src",
+    "--add-dir",
+    "docs",
+    "--timeout",
+    "3m",
+    "--continue",
+    "--conversation",
+    "conv-1",
+    "--sandbox",
+    "--skip-permissions",
+    "task",
+  ]);
+
+  assert.deepEqual(parsed.addDirs, ["src", "docs"]);
+  assert.equal(parsed.timeout, "3m");
+  assert.equal(parsed.continueConversation, true);
+  assert.equal(parsed.conversationId, "conv-1");
+  assert.equal(parsed.sandbox, true);
+  assert.equal(parsed.skipPermissions, true);
 });
 
 test("parseCliArgs --max-files and --max-file-bytes accept custom values", () => {
@@ -306,6 +359,22 @@ test("collectContextFiles deduplicates files matched by both dirs and patterns",
   assert.equal(context.included.length, 1);
 });
 
+test("collectContextFiles supports recursive globstar patterns without node:fs glob", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-globstar-"));
+  await fs.mkdir(path.join(tempDir, "src", "nested"), { recursive: true });
+  await fs.writeFile(path.join(tempDir, "src", "nested", "app.js"), "const x = 1;");
+
+  const context = await collectContextFiles({
+    cwd: tempDir,
+    patterns: ["src/**/*.js"],
+    maxFiles: 10,
+    maxFileBytes: 1024,
+  });
+
+  assert.equal(context.included.length, 1);
+  assert.equal(context.included[0].path, "src/nested/app.js");
+});
+
 // ─── buildAntigravityPrompt — edge cases ──────────────────────────────────────
 
 test("buildAntigravityPrompt with empty context renders no-files placeholder", () => {
@@ -348,4 +417,56 @@ test("buildAntigravityPrompt lists all skipped files in inventory", () => {
   });
   assert.match(prompt, /image\.png \(unsupported-extension\)/);
   assert.match(prompt, /huge\.bin \(unsupported-extension\)/);
+});
+
+test("withModelOverride temporarily writes and restores AGY settings", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-settings-"));
+  const settingsPath = path.join(tempDir, "settings.json");
+  await fs.writeFile(settingsPath, JSON.stringify({ model: "gemini-2.5-pro", other: true }, null, 2));
+
+  let settingsDuringRun;
+  const result = await withModelOverride("gemini-2.5-flash", async () => {
+    settingsDuringRun = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    return 42;
+  }, settingsPath);
+
+  const restored = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  assert.equal(result, 42);
+  assert.equal(settingsDuringRun.model, "gemini-2.5-flash");
+  assert.deepEqual(restored, { model: "gemini-2.5-pro", other: true });
+});
+
+test("resolveAgyExe returns the first discovered agy executable", () => {
+  const fakeSpawn = () => ({ status: 0, stdout: "/usr/bin/agy\n/other/agy\n" });
+  assert.equal(resolveAgyExe(fakeSpawn), "/usr/bin/agy");
+});
+
+test("spawnViaConPty streams chunks incrementally", async () => {
+  const writes = [];
+  const pty = {
+    spawn: () => {
+      const dataHandlers = [];
+      const exitHandlers = [];
+      setTimeout(() => {
+        dataHandlers.forEach((fn) => fn("\x1b[32mfirst\x1b[0m"));
+        dataHandlers.forEach((fn) => fn(" second"));
+        exitHandlers.forEach((fn) => fn({ exitCode: 0 }));
+      }, 0);
+      return {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: (fn) => exitHandlers.push(fn),
+        kill: () => {},
+      };
+    },
+  };
+
+  const exitCode = await spawnViaConPty("agy", ["--print", "x"], pty, 1000, {
+    write: (chunk) => {
+      writes.push(String(chunk));
+      return true;
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(writes, ["first", " second", "\n"]);
 });

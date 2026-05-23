@@ -2,8 +2,8 @@
 
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { globSync } from "node:fs";
-import fs from "node:fs/promises";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
@@ -75,14 +75,20 @@ const MEDIA_TYPES = new Map([
 ]);
 
 const USAGE = `Usage:
-  node scripts/antigravity-bridge.js [options] <task>
+  node "\${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] <task>
 
 Options:
   --task <text>              Explicit task text.
-  --model <name>             Model override (accepted for API compatibility; not forwarded to agy).
+  --model <name>             Temporarily set the AGY model for this call.
   --dirs <path,...>          Directories to ingest recursively.
+  --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
   --files <glob,...>         File globs to ingest.
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
+  --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
+  --continue, -c             Continue the most recent AGY conversation.
+  --conversation <id>        Resume a specific AGY conversation.
+  --sandbox                  Enable AGY sandbox mode.
+  --skip-permissions         Forward --dangerously-skip-permissions to AGY.
   --max-files <n>            Maximum files to inline. Default: 40.
   --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
   --print-command            Print the resolved agy command and exit.
@@ -142,8 +148,14 @@ export function parseCliArgs(argv) {
   const parsed = {
     model: undefined,
     dirs: [],
+    addDirs: [],
     files: [],
     format: "text",
+    timeout: undefined,
+    continueConversation: false,
+    conversationId: undefined,
+    sandbox: false,
+    skipPermissions: false,
     maxFiles: DEFAULT_MAX_FILES,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     printCommand: false,
@@ -178,9 +190,31 @@ export function parseCliArgs(argv) {
         parsed.dirs.push(...splitList(takeOptionValue(argv, index, token)));
         index += 1;
         break;
+      case "--add-dir":
+        parsed.addDirs.push(takeOptionValue(argv, index, token));
+        index += 1;
+        break;
       case "--files":
         parsed.files.push(...splitList(takeOptionValue(argv, index, token)));
         index += 1;
+        break;
+      case "--timeout":
+        parsed.timeout = takeOptionValue(argv, index, token);
+        index += 1;
+        break;
+      case "--continue":
+      case "-c":
+        parsed.continueConversation = true;
+        break;
+      case "--conversation":
+        parsed.conversationId = takeOptionValue(argv, index, token);
+        index += 1;
+        break;
+      case "--sandbox":
+        parsed.sandbox = true;
+        break;
+      case "--skip-permissions":
+        parsed.skipPermissions = true;
         break;
       case "--format": {
         const format = takeOptionValue(argv, index, token);
@@ -226,23 +260,70 @@ export function parseCliArgs(argv) {
   return parsed;
 }
 
+function walkDirSync(dir) {
+  const results = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkDirSync(fullPath));
+    } else if (entry.isFile()) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+function escapeRegex(raw) {
+  return raw.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function globToRegExp(pattern) {
+  const normalized = normalizeSlashes(pattern);
+  let source = "";
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const next = normalized[index + 1];
+
+    if (char === "*") {
+      if (next === "*") {
+        const afterGlobstar = normalized[index + 2];
+        if (afterGlobstar === "/") {
+          source += "(?:.*\\/)?";
+          index += 2;
+        } else {
+          source += ".*";
+          index += 1;
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegex(char);
+    }
+  }
+  return new RegExp(`^${source}$`);
+}
+
 function collectDirectoryMatches(cwd, dirPath) {
-  const normalizedDir = dirPath.replace(/[\\/]+$/, "");
-  return globSync(`${normalizedDir}/**/*`, {
-    cwd,
-    absolute: true,
-    nodir: true,
-    withFileTypes: false,
-  });
+  const absoluteDir = path.resolve(cwd, dirPath.replace(/[\\/]+$/, ""));
+  return walkDirSync(absoluteDir);
 }
 
 function collectPatternMatches(cwd, pattern) {
-  return globSync(pattern, {
-    cwd,
-    absolute: true,
-    nodir: true,
-    withFileTypes: false,
-  });
+  const workspaceRoot = path.resolve(cwd);
+  const matcher = globToRegExp(pattern);
+  return walkDirSync(workspaceRoot).filter((absolutePath) =>
+    matcher.test(relativeToCwd(workspaceRoot, absolutePath)),
+  );
 }
 
 export async function collectContextFiles({
@@ -285,13 +366,13 @@ export async function collectContextFiles({
     }
 
     try {
-      const stat = await fs.stat(absolutePath);
+      const stat = await fsp.stat(absolutePath);
       if (!stat.isFile()) {
         skipped.push({ path: relativePath, reason: "not-a-file" });
         continue;
       }
 
-      const fileBuffer = await fs.readFile(absolutePath);
+      const fileBuffer = await fsp.readFile(absolutePath);
       if (isBinaryCandidate(absolutePath, fileBuffer)) {
         skipped.push({ path: relativePath, reason: "unsupported-extension" });
         continue;
@@ -370,34 +451,69 @@ ${task}
 </constraints>`;
 }
 
-export function buildAntigravityArgs({ prompt }) {
-  return ["--print", prompt];
-}
-
-function resolveAgyExe() {
-  const result = spawnSync("where", ["agy"], { encoding: "utf8", shell: false });
-  if (result.status === 0 && result.stdout.trim()) {
-    return result.stdout.trim().split(/\r?\n/)[0];
+export function buildAntigravityArgs({
+  prompt,
+  timeout,
+  continueConversation = false,
+  conversationId,
+  addDirs = [],
+  sandbox = false,
+  skipPermissions = false,
+} = {}) {
+  const args = [];
+  if (continueConversation) args.push("--continue");
+  if (conversationId) args.push("--conversation", conversationId);
+  for (const dir of addDirs) {
+    args.push("--add-dir", dir);
   }
-  const fallback = path.join(
-    process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
-    "agy",
-    "bin",
-    "agy.exe",
-  );
-  return fallback;
+  if (sandbox) args.push("--sandbox");
+  if (skipPermissions) args.push("--dangerously-skip-permissions");
+  args.push("--print", prompt);
+  if (timeout) args.push("--print-timeout", timeout);
+  return args;
 }
 
-function loadNodePty() {
+export function resolveAgyExe(_spawnSync = spawnSync, _fs = fs) {
+  const isWin = process.platform === "win32";
+  const whichCmd = isWin ? "where" : "which";
+  const result = _spawnSync(whichCmd, ["agy"], { encoding: "utf8", shell: false });
+  const stdout = typeof result.stdout === "string" ? result.stdout : "";
+  if (result.status === 0 && stdout.trim()) {
+    return stdout.trim().split(/\r?\n/)[0];
+  }
+  if (isWin) {
+    return path.join(
+      process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+      "agy",
+      "bin",
+      "agy.exe",
+    );
+  }
+
+  const home = process.env.HOME ?? "";
+  for (const candidate of [path.join(home, ".local", "bin", "agy"), "/usr/local/bin/agy"]) {
+    try {
+      _fs.accessSync(candidate, _fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+  return "agy";
+}
+
+export function loadNodePty() {
   const require = createRequire(import.meta.url);
-  const candidates = [
-    path.join(
+  const candidates = [];
+  if (process.platform === "win32") {
+    candidates.push(path.join(
       process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
       "agy",
       "node_modules",
       "node-pty",
-    ),
-  ];
+    ));
+  }
+  candidates.push("node-pty");
   for (const candidate of candidates) {
     try {
       return require(candidate);
@@ -418,11 +534,65 @@ export function stripAnsi(raw) {
 
 const CONPTY_TIMEOUT_MS = 120_000;
 
+function parseTimeoutMs(timeout) {
+  if (!timeout) return CONPTY_TIMEOUT_MS;
+  const match = String(timeout).trim().match(/^(\d+)(ms|s|m|h)?(?:0s)?$/);
+  if (!match) return CONPTY_TIMEOUT_MS;
+  const value = Number.parseInt(match[1], 10);
+  const unit = match[2] ?? "ms";
+  if (unit === "h") return value * 60 * 60 * 1000;
+  if (unit === "m") return value * 60 * 1000;
+  if (unit === "s") return value * 1000;
+  return value;
+}
+
+function getAgySettingsPath() {
+  return path.join(
+    process.env.HOME ?? process.env.USERPROFILE ?? "",
+    ".gemini",
+    "antigravity-cli",
+    "settings.json",
+  );
+}
+
+export async function withModelOverride(model, fn, settingsPath = getAgySettingsPath()) {
+  if (!model) return fn();
+
+  let originalSettings = null;
+  let settings = {};
+  try {
+    originalSettings = await fsp.readFile(settingsPath, "utf8");
+    settings = JSON.parse(originalSettings);
+  } catch {
+    settings = {};
+  }
+
+  const previousModel = settings.model;
+  settings.model = model;
+  await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+
+  try {
+    return await fn();
+  } finally {
+    if (originalSettings !== null) {
+      await fsp.writeFile(settingsPath, originalSettings);
+    } else {
+      delete settings.model;
+      if (previousModel !== undefined) {
+        settings.model = previousModel;
+      }
+      await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    }
+  }
+}
+
 // PTY merges stdout and stderr into a single stream by design; agy error output
 // (auth failures, rate limits) will appear in the same stream as the response body.
-async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_MS, _stdout = process.stdout) {
+export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_MS, _stdout = process.stdout) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
+    let wroteOutput = false;
+    let lastOutput = "";
     let term;
     try {
       term = pty.spawn(agyExe, agyArgs, {
@@ -445,12 +615,17 @@ async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_M
       ));
     }, timeoutMs);
 
-    term.onData((data) => chunks.push(data));
+    term.onData((data) => {
+      const clean = stripAnsi(data);
+      if (clean) {
+        wroteOutput = true;
+        lastOutput = clean;
+        _stdout.write(clean);
+      }
+    });
     term.onExit(({ exitCode }) => {
       clearTimeout(timer);
-      const clean = stripAnsi(chunks.join(""));
-      _stdout.write(clean);
-      if (!clean.endsWith("\n")) {
+      if (wroteOutput && !lastOutput.endsWith("\n")) {
         _stdout.write("\n");
       }
       resolve(exitCode ?? 1);
@@ -486,20 +661,53 @@ export async function main(argv = process.argv.slice(2), {
       maxFileBytes: parsed.maxFileBytes,
     });
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
-    const agyArgs = buildAntigravityArgs({ prompt });
+    const model = parsed.model ?? process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL;
+    const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
+    const agyArgs = buildAntigravityArgs({
+      prompt,
+      timeout,
+      continueConversation: parsed.continueConversation,
+      conversationId: parsed.conversationId,
+      addDirs: parsed.addDirs,
+      sandbox: parsed.sandbox,
+      skipPermissions: parsed.skipPermissions,
+    });
 
     if (parsed.printCommand) {
       printResolvedCommand(agyArgs, _stdout);
       return 0;
     }
 
-    const ptyModule = _loadNodePty();
-    if (ptyModule) {
-      const agyExe = resolveAgyExe();
-      try {
-        return await spawnViaConPty(agyExe, agyArgs, ptyModule, _conPtyTimeoutMs, _stdout);
-      } catch (err) {
-        if (err?.code === "ENOENT" || String(err).includes("not found")) {
+    return await withModelOverride(model, async () => {
+      const ptyModule = _loadNodePty();
+      if (ptyModule) {
+        const agyExe = resolveAgyExe(_spawnSync);
+        try {
+          return await spawnViaConPty(
+            agyExe,
+            agyArgs,
+            ptyModule,
+            timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
+            _stdout,
+          );
+        } catch (err) {
+          if (err?.code === "ENOENT" || String(err).includes("not found")) {
+            throw new Error(
+              "Antigravity CLI (agy) is not installed or not on PATH.\n" +
+                "Install it with:\n" +
+                "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
+                "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
+                "Then authenticate by launching `agy` once.",
+            );
+          }
+          throw err;
+        }
+      }
+
+      // Fallback for platforms or installs where node-pty is unavailable.
+      const result = _spawnSync(resolveAgyExe(_spawnSync), agyArgs, { stdio: "inherit" });
+      if (result.error) {
+        if (result.error.code === "ENOENT") {
           throw new Error(
             "Antigravity CLI (agy) is not installed or not on PATH.\n" +
               "Install it with:\n" +
@@ -508,25 +716,10 @@ export async function main(argv = process.argv.slice(2), {
               "Then authenticate by launching `agy` once.",
           );
         }
-        throw err;
+        throw result.error;
       }
-    }
-
-    // Fallback for non-Windows or when node-pty is unavailable
-    const result = _spawnSync("agy", agyArgs, { stdio: "inherit" });
-    if (result.error) {
-      if (result.error.code === "ENOENT") {
-        throw new Error(
-          "Antigravity CLI (agy) is not installed or not on PATH.\n" +
-            "Install it with:\n" +
-            "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
-            "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
-            "Then authenticate by launching `agy` once.",
-        );
-      }
-      throw result.error;
-    }
-    return result.status ?? 1;
+      return result.status ?? 1;
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     _stderr.write(message + "\n");
