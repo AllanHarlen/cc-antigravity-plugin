@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { globSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import process from "node:process";
 
 const DEFAULT_MAX_FILES = 40;
@@ -372,16 +374,84 @@ export function buildAntigravityArgs({ prompt }) {
   return ["--print", prompt];
 }
 
-function ensureAgyInstalled(spawnError) {
-  if (spawnError?.code === "ENOENT") {
-    throw new Error(
-      "Antigravity CLI (agy) is not installed or not on PATH.\n" +
-        "Install it with:\n" +
-        "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
-        "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
-        "Then authenticate by launching `agy` once.",
-    );
+function resolveAgyExe() {
+  const result = spawnSync("where", ["agy"], { encoding: "utf8", shell: false });
+  if (result.status === 0 && result.stdout.trim()) {
+    return result.stdout.trim().split(/\r?\n/)[0];
   }
+  const fallback = path.join(
+    process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+    "agy",
+    "bin",
+    "agy.exe",
+  );
+  return fallback;
+}
+
+function loadNodePty() {
+  const require = createRequire(import.meta.url);
+  const candidates = [
+    path.join(
+      process.env.APPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Roaming"),
+      "npm",
+      "node_modules",
+      "@google",
+      "gemini-cli",
+      "node_modules",
+      "node-pty",
+    ),
+    path.join(
+      process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+      "agy",
+      "node_modules",
+      "node-pty",
+    ),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return require(candidate);
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+function stripAnsi(raw) {
+  return raw
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+    .replace(/\x1b\][^\x07]*\x07/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[^\x20-\x7E\n\t]/g, "");
+}
+
+async function spawnViaConPty(agyExe, agyArgs, pty) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let term;
+    try {
+      term = pty.spawn(agyExe, agyArgs, {
+        name: "xterm-color",
+        cols: 220,
+        rows: 30,
+        cwd: process.cwd(),
+        env: process.env,
+      });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    term.onData((data) => chunks.push(data));
+    term.onExit(({ exitCode }) => {
+      const clean = stripAnsi(chunks.join(""));
+      process.stdout.write(clean);
+      if (!clean.endsWith("\n")) {
+        process.stdout.write("\n");
+      }
+      resolve(exitCode ?? 0);
+    });
+  });
 }
 
 function printResolvedCommand(args) {
@@ -413,12 +483,36 @@ export async function main(argv = process.argv.slice(2)) {
       return 0;
     }
 
-    const result = spawnSync("agy", agyArgs, {
-      stdio: "inherit",
-    });
+    const ptyModule = loadNodePty();
+    if (ptyModule) {
+      const agyExe = resolveAgyExe();
+      try {
+        return await spawnViaConPty(agyExe, agyArgs, ptyModule);
+      } catch (err) {
+        if (err?.code === "ENOENT" || String(err).includes("not found")) {
+          throw new Error(
+            "Antigravity CLI (agy) is not installed or not on PATH.\n" +
+              "Install it with:\n" +
+              "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
+              "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
+              "Then authenticate by launching `agy` once.",
+          );
+        }
+        throw err;
+      }
+    }
 
-    ensureAgyInstalled(result.error);
-
+    // Fallback for non-Windows or when node-pty is unavailable
+    const result = spawnSync("agy", agyArgs, { stdio: "inherit" });
+    if (result.error?.code === "ENOENT") {
+      throw new Error(
+        "Antigravity CLI (agy) is not installed or not on PATH.\n" +
+          "Install it with:\n" +
+          "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
+          "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
+          "Then authenticate by launching `agy` once.",
+      );
+    }
     return result.status ?? 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -427,7 +521,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const isMain =
+  process.argv[1] != null &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+
+if (isMain) {
   const exitCode = await main();
   process.exit(exitCode);
 }
