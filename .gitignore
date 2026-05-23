@@ -1,0 +1,15 @@
+# Claude Code local settings (user-specific)
+.claude/settings.local.json
+.claude/*.local.md
+
+# OS files
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+node_modules/
+
+# Development docs
+docs/

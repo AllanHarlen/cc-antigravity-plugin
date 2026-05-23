@@ -1,0 +1,6 @@
+interface:
+  display_name: "Antigravity Integration"
+  short_description: "Use Antigravity CLI (AGY) for large, cross-file analysis."
+  default_prompt: "Use $antigravity-integration when a broad codebase slice, refactor impact check, documentation pass, or mixed structured-data review would benefit from one large-context Antigravity CLI handoff."
+policy:
+  allow_implicit_invocation: true

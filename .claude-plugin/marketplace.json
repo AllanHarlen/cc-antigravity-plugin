@@ -1,0 +1,35 @@
+{
+    "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+    "name": "cc-antigravity-plugin",
+    "description": "Antigravity CLI (AGY) integration for Claude Code with shared runtime support for Codex",
+    "owner": {
+        "name": "thepushkarp",
+        "email": ""
+    },
+    "plugins": [
+        {
+            "name": "cc-antigravity-plugin",
+            "description": "Invoke Antigravity CLI (AGY) for long-context code exploration, architecture review, codebase analysis, and structured data synthesis",
+            "version": "2.0.0",
+            "author": {
+                "name": "thepushkarp"
+            },
+            "source": "./",
+            "category": "integrations",
+            "keywords": [
+                "antigravity",
+                "agy",
+                "google",
+                "code-exploration",
+                "analysis",
+                "long-context",
+                "documentation",
+                "writing",
+                "codex",
+                "claude-code"
+            ],
+            "homepage": "https://github.com/AllanHarlen/cc-antigravity-plugin",
+            "repository": "https://github.com/AllanHarlen/cc-antigravity-plugin"
+        }
+    ]
+}
