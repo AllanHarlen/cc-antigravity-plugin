@@ -1,16 +1,17 @@
 # cc-antigravity-plugin
 
-Give Claude Code and Codex a long-context Antigravity CLI (AGY) handoff for
-architecture review, refactor impact analysis, documentation synthesis, and
-mixed text-data analysis.
+Leve para o Claude Code e para o Codex uma passagem de contexto longo pelo
+Antigravity CLI (AGY), ideal para revisao de arquitetura, analise de impacto de
+refatoracao, sintese de documentacao e analise de dados textuais mistos.
 
-Claude Code is strongest for precise local edits. AGY is useful when a broad
-slice of a repository should be read and synthesized in one pass. This plugin
-connects both through a shared Node.js bridge.
+O Claude Code e excelente para edicoes locais e precisas. O AGY ajuda quando
+uma fatia ampla do repositorio precisa ser lida e sintetizada em uma unica
+passagem. Este plugin conecta os dois por meio de um bridge Node.js
+compartilhado.
 
-## Prerequisites
+## Pre-requisitos
 
-Install and authenticate AGY:
+Instale e autentique o AGY:
 
 ```bash
 # macOS / Linux
@@ -23,7 +24,7 @@ agy
 agy --print "what is 2+2"
 ```
 
-## Install
+## Instalacao
 
 ### Claude Code
 
@@ -41,119 +42,120 @@ git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
   ~/.agents/skills/cc-antigravity-plugin
 ```
 
-Restart Codex after cloning.
+Reinicie o Codex depois de clonar.
 
-## Usage
+## Uso
 
 ```bash
-/cc-antigravity-plugin:antigravity <task>
-/cc-antigravity-plugin:antigravity --dirs src,docs <task>
-/cc-antigravity-plugin:antigravity --files "schemas/**/*.json,data/**/*.csv" <task>
-/cc-antigravity-plugin:antigravity --add-dir src <task>
+/cc-antigravity-plugin:antigravity <tarefa>
+/cc-antigravity-plugin:antigravity --dirs src,docs <tarefa>
+/cc-antigravity-plugin:antigravity --files "schemas/**/*.json,data/**/*.csv" <tarefa>
+/cc-antigravity-plugin:antigravity --add-dir src <tarefa>
 ```
 
-Codex can use the root skill with:
+No Codex, use a skill raiz com:
 
 ```text
 $antigravity-integration
 ```
 
-## Options
+## Opcoes
 
-| Option | Description |
-|--------|-------------|
-| `--dirs <path,...>` | Recursively inline directories into the bridge prompt |
-| `--files <glob,...>` | Inline files that match comma-separated glob patterns |
-| `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
-| `--model <name>` | Temporarily set the AGY model and restore settings afterward |
-| `--continue`, `-c` | Continue the most recent AGY conversation |
-| `--conversation <id>` | Resume a specific AGY conversation |
-| `--timeout <duration>` | Forward `--print-timeout` to AGY, for example `3m` |
-| `--sandbox` | Enable AGY sandbox mode |
-| `--skip-permissions` | Forward AGY `--dangerously-skip-permissions` |
-| `--max-files <n>` | Maximum files to inline, default `40` |
-| `--max-file-bytes <n>` | Maximum bytes per inlined file, default `32768` |
-| `--print-command` | Print the resolved `agy` command without running it |
+| Opcao | Descricao |
+|-------|-----------|
+| `--dirs <path,...>` | Injeta diretorios recursivamente no prompt do bridge |
+| `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por virgula |
+| `--add-dir <path>` | Repassa o `--add-dir` nativo do AGY; pode ser repetido |
+| `--model <name>` | Define temporariamente o modelo do AGY e restaura as configuracoes depois |
+| `--continue`, `-c` | Continua a conversa mais recente do AGY |
+| `--conversation <id>` | Retoma uma conversa especifica do AGY |
+| `--timeout <duration>` | Repassa `--print-timeout` ao AGY, por exemplo `3m` |
+| `--sandbox` | Ativa o modo sandbox do AGY |
+| `--skip-permissions` | Repassa `--dangerously-skip-permissions` ao AGY |
+| `--max-files <n>` | Numero maximo de arquivos injetados, padrao `40` |
+| `--max-file-bytes <n>` | Numero maximo de bytes por arquivo injetado, padrao `32768` |
+| `--print-command` | Imprime o comando `agy` resolvido sem executar |
 
-`--format json` is not supported because AGY headless print mode returns text.
+`--format json` nao e suportado porque o modo headless `--print` do AGY retorna
+texto.
 
-## Examples
+## Exemplos
 
 ```bash
 /cc-antigravity-plugin:antigravity --dirs src,docs \
-  "Explain the architecture. Cite key files and data flows."
+  "Explique a arquitetura. Cite arquivos-chave e fluxos de dados."
 ```
 
 ```bash
 /cc-antigravity-plugin:antigravity --add-dir src --model gemini-2.5-flash \
-  "Analyze the refactor impact of the auth module."
+  "Analise o impacto de refatorar o modulo de auth."
 ```
 
 ```bash
 /cc-antigravity-plugin:antigravity --continue --timeout 5m \
-  "Summarize the migration plan from the previous answer."
+  "Resuma o plano de migracao da resposta anterior."
 ```
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src --print-command -- "analyze auth"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src --print-command -- "analisar auth"
 ```
 
-## How It Works
+## Como Funciona
 
-The shared bridge at `scripts/antigravity-bridge.js`:
+O bridge compartilhado em `scripts/antigravity-bridge.js`:
 
-1. Parses bridge flags.
-2. Resolves `--dirs` and `--files` without Node 22-only glob APIs.
-3. Filters ignored paths and binary files.
-4. Builds a structured prompt with inventory, inline payloads, task, and constraints.
-5. Maps AGY-native flags such as `--add-dir`, `--continue`, `--conversation`,
-   `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout`.
-6. Applies `--model` by temporarily updating `~/.gemini/antigravity-cli/settings.json`.
-7. Runs AGY through `node-pty` when available and streams output as it arrives,
-   with a `spawnSync` fallback.
+1. Faz o parse das flags do bridge.
+2. Resolve `--dirs` e `--files` sem depender de APIs de glob exclusivas do Node 22.
+3. Filtra caminhos ignorados e arquivos binarios.
+4. Monta um prompt estruturado com inventario, payloads inline, tarefa e restricoes.
+5. Mapeia flags nativas do AGY como `--add-dir`, `--continue`, `--conversation`,
+   `--sandbox`, `--dangerously-skip-permissions` e `--print-timeout`.
+6. Aplica `--model` atualizando temporariamente `~/.gemini/antigravity-cli/settings.json`.
+7. Executa o AGY via `node-pty` quando disponivel e faz streaming do output conforme
+   ele chega, com fallback para `spawnSync`.
 
-## Repository Layout
+## Estrutura do Repositorio
 
 ```text
 cc-antigravity-plugin/
-├── .claude-plugin/
-│   ├── marketplace.json
-│   └── plugin.json
-├── agents/
-│   └── antigravity-agent.md
-├── bin/
-│   └── antigravity-bridge
-├── commands/
-│   └── antigravity.md
-├── hooks/
-│   └── hooks.json
-├── scripts/
-│   ├── antigravity-bridge.js
-│   └── check-agy.js
-├── tests/
-│   ├── antigravity-bridge.test.js
-│   └── antigravity-main.test.js
-├── SKILL.md
-├── LICENSE
-└── package.json
+|-- .claude-plugin/
+|   |-- marketplace.json
+|   `-- plugin.json
+|-- agents/
+|   `-- antigravity-agent.md
+|-- bin/
+|   `-- antigravity-bridge
+|-- commands/
+|   `-- antigravity.md
+|-- hooks/
+|   `-- hooks.json
+|-- scripts/
+|   |-- antigravity-bridge.js
+|   `-- check-agy.js
+|-- tests/
+|   |-- antigravity-bridge.test.js
+|   `-- antigravity-main.test.js
+|-- SKILL.md
+|-- LICENSE
+`-- package.json
 ```
 
-## Development
+## Desenvolvimento
 
 ```bash
 npm test
 ```
 
-## Troubleshooting
+## Solucao de Problemas
 
-| Problem | Solution |
-|---------|----------|
-| Authentication error | Run `agy` interactively and sign in. |
-| `agy` not found | Re-run the AGY installer and make sure the binary is on PATH. |
-| Model override failed | Set the model inside AGY with `/model`, then retry without `--model`. |
-| Token pressure | Reduce `--dirs`, narrow `--files`, or lower `--max-files`. |
-| Timeout | Increase `--timeout`, reduce context, or tighten the task. |
+| Problema | Solucao |
+|----------|---------|
+| Erro de autenticacao | Rode `agy` interativamente e faca login. |
+| `agy` nao encontrado | Rode o instalador do AGY novamente e confirme que o binario esta no PATH. |
+| Override de modelo falhou | Defina o modelo dentro do AGY com `/model` e tente novamente sem `--model`. |
+| Pressao de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
+| Timeout | Aumente `--timeout`, reduza o contexto ou deixe a tarefa mais direta. |
 
-## License
+## Licenca
 
 MIT
