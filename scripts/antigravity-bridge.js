@@ -345,7 +345,7 @@ export function buildAntigravityPrompt({ task, context }) {
       : context.included
           .map(
             (file) => `<file path="${file.path}" media_type="${file.mediaType}" truncated="${file.truncated}">
-${file.content}
+${file.content.replaceAll("</", "<\\/")}
 </file>`,
           )
           .join("\n\n");
@@ -392,15 +392,6 @@ function loadNodePty() {
   const require = createRequire(import.meta.url);
   const candidates = [
     path.join(
-      process.env.APPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Roaming"),
-      "npm",
-      "node_modules",
-      "@google",
-      "gemini-cli",
-      "node_modules",
-      "node-pty",
-    ),
-    path.join(
       process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
       "agy",
       "node_modules",
@@ -422,10 +413,13 @@ function stripAnsi(raw) {
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07]*\x07/g, "")
     .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/[^\x20-\x7E\n\t]/g, "");
+    .replace(/\r/g, "\n");
 }
 
+const CONPTY_TIMEOUT_MS = 120_000;
+
+// PTY merges stdout and stderr into a single stream by design; agy error output
+// (auth failures, rate limits) will appear in the same stream as the response body.
 async function spawnViaConPty(agyExe, agyArgs, pty) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -442,14 +436,24 @@ async function spawnViaConPty(agyExe, agyArgs, pty) {
       reject(err);
       return;
     }
+
+    const timer = setTimeout(() => {
+      try { term.kill(); } catch { /* already dead */ }
+      reject(new Error(
+        `agy did not respond within ${CONPTY_TIMEOUT_MS / 1000}s.\n` +
+        "Check authentication (run `agy` once interactively) and network connectivity.",
+      ));
+    }, CONPTY_TIMEOUT_MS);
+
     term.onData((data) => chunks.push(data));
     term.onExit(({ exitCode }) => {
+      clearTimeout(timer);
       const clean = stripAnsi(chunks.join(""));
       process.stdout.write(clean);
       if (!clean.endsWith("\n")) {
         process.stdout.write("\n");
       }
-      resolve(exitCode ?? 0);
+      resolve(exitCode ?? 1);
     });
   });
 }
@@ -504,14 +508,17 @@ export async function main(argv = process.argv.slice(2)) {
 
     // Fallback for non-Windows or when node-pty is unavailable
     const result = spawnSync("agy", agyArgs, { stdio: "inherit" });
-    if (result.error?.code === "ENOENT") {
-      throw new Error(
-        "Antigravity CLI (agy) is not installed or not on PATH.\n" +
-          "Install it with:\n" +
-          "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
-          "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
-          "Then authenticate by launching `agy` once.",
-      );
+    if (result.error) {
+      if (result.error.code === "ENOENT") {
+        throw new Error(
+          "Antigravity CLI (agy) is not installed or not on PATH.\n" +
+            "Install it with:\n" +
+            "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
+            "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
+            "Then authenticate by launching `agy` once.",
+        );
+      }
+      throw result.error;
     }
     return result.status ?? 1;
   } catch (error) {
