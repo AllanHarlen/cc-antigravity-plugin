@@ -163,6 +163,10 @@ function summarizeAgyArgs(args) {
   return summarized;
 }
 
+function shouldLogAgyOutput() {
+  return process.env.CC_ANTIGRAVITY_LOG_OUTPUT === "1";
+}
+
 function splitList(value) {
   return value
     .split(",")
@@ -699,6 +703,9 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
       if (clean) {
         wroteOutput = true;
         lastOutput = clean;
+        if (shouldLogAgyOutput()) {
+          logEvent("agy.output.chunk", { text: clean });
+        }
         _stdout.write(clean);
       }
     });
