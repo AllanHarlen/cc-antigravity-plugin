@@ -95,6 +95,74 @@ Options:
   -h, --help                 Show this help message.
 `;
 
+function logEvent(event, data = {}) {
+  const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH;
+  if (!logPath) return;
+
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(
+      logPath,
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        pid: process.pid,
+        event,
+        ...data,
+      }) + "\n",
+      "utf8",
+    );
+  } catch {
+    // Logging must never affect plugin execution.
+  }
+}
+
+function summarizeParsedArgs(parsed) {
+  return {
+    model: parsed.model,
+    dirs: parsed.dirs,
+    addDirs: parsed.addDirs,
+    files: parsed.files,
+    format: parsed.format,
+    timeout: parsed.timeout,
+    continueConversation: parsed.continueConversation,
+    conversationId: parsed.conversationId,
+    sandbox: parsed.sandbox,
+    skipPermissions: parsed.skipPermissions,
+    maxFiles: parsed.maxFiles,
+    maxFileBytes: parsed.maxFileBytes,
+    printCommand: parsed.printCommand,
+    help: parsed.help,
+    taskLength: parsed.task.length,
+  };
+}
+
+function summarizeContext(context) {
+  return {
+    includedCount: context.included.length,
+    skippedCount: context.skipped.length,
+    included: context.included.map((file) => ({
+      path: file.path,
+      mediaType: file.mediaType,
+      bytes: file.bytes,
+      truncated: file.truncated,
+    })),
+    skipped: context.skipped,
+  };
+}
+
+function summarizeAgyArgs(args) {
+  const summarized = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    summarized.push(arg);
+    if (arg === "--print" && index + 1 < args.length) {
+      summarized.push(`<prompt:${args[index + 1].length} chars>`);
+      index += 1;
+    }
+  }
+  return summarized;
+}
+
 function splitList(value) {
   return value
     .split(",")
@@ -558,6 +626,7 @@ function getAgySettingsPath() {
 export async function withModelOverride(model, fn, settingsPath = getAgySettingsPath()) {
   if (!model) return fn();
 
+  logEvent("model.override.start", { model, settingsPath });
   let originalSettings = null;
   let settings = {};
   try {
@@ -584,6 +653,7 @@ export async function withModelOverride(model, fn, settingsPath = getAgySettings
       }
       await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
     }
+    logEvent("model.override.restore", { model, settingsPath });
   }
 }
 
@@ -594,6 +664,11 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
     let wroteOutput = false;
     let lastOutput = "";
     let term;
+    logEvent("agy.conpty.spawn.start", {
+      agyExe,
+      timeoutMs,
+      args: summarizeAgyArgs(agyArgs),
+    });
     try {
       term = pty.spawn(agyExe, agyArgs, {
         name: "xterm-color",
@@ -603,12 +678,16 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
         env: process.env,
       });
     } catch (err) {
+      logEvent("agy.conpty.spawn.error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
       reject(err);
       return;
     }
 
     const timer = setTimeout(() => {
       try { term.kill(); } catch { /* already dead */ }
+      logEvent("agy.conpty.timeout", { timeoutMs });
       reject(new Error(
         `agy did not respond within ${timeoutMs / 1000}s.\n` +
         "Check authentication (run `agy` once interactively) and network connectivity.",
@@ -628,6 +707,7 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
       if (wroteOutput && !lastOutput.endsWith("\n")) {
         _stdout.write("\n");
       }
+      logEvent("agy.conpty.spawn.exit", { exitCode: exitCode ?? 1 });
       resolve(exitCode ?? 1);
     });
   });
@@ -646,10 +726,13 @@ export async function main(argv = process.argv.slice(2), {
   _stderr = process.stderr,
 } = {}) {
   try {
+    logEvent("bridge.start", { argv });
     const parsed = parseCliArgs(argv);
+    logEvent("bridge.args.parsed", summarizeParsedArgs(parsed));
 
     if (parsed.help) {
       _stdout.write(USAGE);
+      logEvent("bridge.help", {});
       return 0;
     }
 
@@ -660,6 +743,7 @@ export async function main(argv = process.argv.slice(2), {
       maxFiles: parsed.maxFiles,
       maxFileBytes: parsed.maxFileBytes,
     });
+    logEvent("bridge.context.collected", summarizeContext(context));
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
     const model = parsed.model ?? process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL;
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
@@ -672,9 +756,11 @@ export async function main(argv = process.argv.slice(2), {
       sandbox: parsed.sandbox,
       skipPermissions: parsed.skipPermissions,
     });
+    logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), model, timeout });
 
     if (parsed.printCommand) {
       printResolvedCommand(agyArgs, _stdout);
+      logEvent("bridge.print-command", { args: summarizeAgyArgs(agyArgs) });
       return 0;
     }
 
@@ -705,8 +791,14 @@ export async function main(argv = process.argv.slice(2), {
       }
 
       // Fallback for platforms or installs where node-pty is unavailable.
-      const result = _spawnSync(resolveAgyExe(_spawnSync), agyArgs, { stdio: "inherit" });
+      const agyExe = resolveAgyExe(_spawnSync);
+      logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
+      const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
       if (result.error) {
+        logEvent("agy.spawnsync.error", {
+          code: result.error.code,
+          message: result.error.message,
+        });
         if (result.error.code === "ENOENT") {
           throw new Error(
             "Antigravity CLI (agy) is not installed or not on PATH.\n" +
@@ -718,10 +810,12 @@ export async function main(argv = process.argv.slice(2), {
         }
         throw result.error;
       }
+      logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
       return result.status ?? 1;
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logEvent("bridge.error", { message });
     _stderr.write(message + "\n");
     return 1;
   }

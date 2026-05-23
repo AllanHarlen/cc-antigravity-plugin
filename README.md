@@ -146,6 +146,32 @@ cc-antigravity-plugin/
 npm test
 ```
 
+### Teste controlado com logs
+
+Para abrir o Claude Code com o plugin instrumentado e acompanhar o log do bridge
+em tempo real:
+
+```powershell
+.\scripts\run-claude-plugin-dev.ps1
+```
+
+O script cria um arquivo em `.antigravitycli/logs/*.jsonl`, define
+`CC_ANTIGRAVITY_LOG_PATH` para a sessao e abre uma segunda janela fazendo
+`Get-Content -Wait` nesse log.
+
+Dentro do Claude Code, rode um ciclo pequeno:
+
+```text
+/plugin marketplace add ./
+/plugin install cc-antigravity-plugin@cc-antigravity-plugin
+/reload-plugins
+/cc-antigravity-plugin:antigravity --files package.json --timeout 2m responda apenas plugin-log-ok
+```
+
+O log registra eventos como parse de argumentos, arquivos coletados, flags
+repassadas ao AGY, override/restauracao de modelo, inicio/fim da execucao e
+erros. O prompt completo nao e gravado; o log mostra apenas o tamanho dele.
+
 ## Solucao de Problemas
 
 | Problema | Solucao |
