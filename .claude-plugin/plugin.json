@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "description": "Integrate Antigravity CLI (AGY) for long-context code exploration with model selection and conversation continuity",
     "author": {
         "name": "Allan Harlen",
@@ -29,7 +29,6 @@
     "agents": [
         "./agents/antigravity-agent.md"
     ],
-    "hooks": "./hooks/hooks.json",
     "userConfig": {
         "default_model": {
             "type": "string",
