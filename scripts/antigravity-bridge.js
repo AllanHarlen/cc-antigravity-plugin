@@ -408,7 +408,7 @@ function loadNodePty() {
   return null;
 }
 
-function stripAnsi(raw) {
+export function stripAnsi(raw) {
   return raw
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07]*\x07/g, "")
@@ -420,7 +420,7 @@ const CONPTY_TIMEOUT_MS = 120_000;
 
 // PTY merges stdout and stderr into a single stream by design; agy error output
 // (auth failures, rate limits) will appear in the same stream as the response body.
-async function spawnViaConPty(agyExe, agyArgs, pty) {
+async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_MS, _stdout = process.stdout) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let term;
@@ -440,35 +440,41 @@ async function spawnViaConPty(agyExe, agyArgs, pty) {
     const timer = setTimeout(() => {
       try { term.kill(); } catch { /* already dead */ }
       reject(new Error(
-        `agy did not respond within ${CONPTY_TIMEOUT_MS / 1000}s.\n` +
+        `agy did not respond within ${timeoutMs / 1000}s.\n` +
         "Check authentication (run `agy` once interactively) and network connectivity.",
       ));
-    }, CONPTY_TIMEOUT_MS);
+    }, timeoutMs);
 
     term.onData((data) => chunks.push(data));
     term.onExit(({ exitCode }) => {
       clearTimeout(timer);
       const clean = stripAnsi(chunks.join(""));
-      process.stdout.write(clean);
+      _stdout.write(clean);
       if (!clean.endsWith("\n")) {
-        process.stdout.write("\n");
+        _stdout.write("\n");
       }
       resolve(exitCode ?? 1);
     });
   });
 }
 
-function printResolvedCommand(args) {
+function printResolvedCommand(args, _stdout = process.stdout) {
   const rendered = ["agy", ...args.map((arg) => JSON.stringify(arg))].join(" ");
-  process.stdout.write(rendered + "\n");
+  _stdout.write(rendered + "\n");
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2), {
+  _spawnSync = spawnSync,
+  _loadNodePty = loadNodePty,
+  _conPtyTimeoutMs = CONPTY_TIMEOUT_MS,
+  _stdout = process.stdout,
+  _stderr = process.stderr,
+} = {}) {
   try {
     const parsed = parseCliArgs(argv);
 
     if (parsed.help) {
-      process.stdout.write(USAGE);
+      _stdout.write(USAGE);
       return 0;
     }
 
@@ -483,15 +489,15 @@ export async function main(argv = process.argv.slice(2)) {
     const agyArgs = buildAntigravityArgs({ prompt });
 
     if (parsed.printCommand) {
-      printResolvedCommand(agyArgs);
+      printResolvedCommand(agyArgs, _stdout);
       return 0;
     }
 
-    const ptyModule = loadNodePty();
+    const ptyModule = _loadNodePty();
     if (ptyModule) {
       const agyExe = resolveAgyExe();
       try {
-        return await spawnViaConPty(agyExe, agyArgs, ptyModule);
+        return await spawnViaConPty(agyExe, agyArgs, ptyModule, _conPtyTimeoutMs, _stdout);
       } catch (err) {
         if (err?.code === "ENOENT" || String(err).includes("not found")) {
           throw new Error(
@@ -507,7 +513,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     // Fallback for non-Windows or when node-pty is unavailable
-    const result = spawnSync("agy", agyArgs, { stdio: "inherit" });
+    const result = _spawnSync("agy", agyArgs, { stdio: "inherit" });
     if (result.error) {
       if (result.error.code === "ENOENT") {
         throw new Error(
@@ -523,7 +529,7 @@ export async function main(argv = process.argv.slice(2)) {
     return result.status ?? 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(message + "\n");
+    _stderr.write(message + "\n");
     return 1;
   }
 }
