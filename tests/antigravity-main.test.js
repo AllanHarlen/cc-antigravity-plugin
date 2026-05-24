@@ -40,6 +40,16 @@ function fakePtyModule(opts = {}) {
   };
 }
 
+function fakeSpawnSuccess(calls = []) {
+  return (cmd, args = []) => {
+    calls.push({ cmd, args });
+    if (cmd === "where" || cmd === "which") {
+      return { status: 0, stdout: "agy\n" };
+    }
+    return { error: null, status: 0 };
+  };
+}
+
 // ─── --help ───────────────────────────────────────────────────────────────────
 
 test("main --help prints usage and returns 0", async () => {
@@ -71,8 +81,20 @@ test("main --print-command prints agy command and returns 0", async () => {
   const io = makeStreams();
   const result = await main(["--print-command", "analyze this"], io);
   assert.equal(result, 0);
-  assert.match(io.stdout, /agy/);
+  assert.match(io.stdout, /agy "-i" "\/model gemini-3\.5-flash-medium"/);
   assert.match(io.stdout, /--print/);
+});
+
+test("main --print-command includes explicit Claude model selection when requested", async () => {
+  const io = makeStreams();
+  const result = await main([
+    "--model",
+    "claude-4.6-sonnet-thinking",
+    "--print-command",
+    "analyze this",
+  ], io);
+  assert.equal(result, 0);
+  assert.match(io.stdout, /agy "-i" "\/model claude-4\.6-sonnet-thinking"/);
 });
 
 // ─── spawnSync fallback ───────────────────────────────────────────────────────
@@ -106,19 +128,29 @@ test("main spawnSync fallback: non-ENOENT error is surfaced and returns 1", asyn
 
 test("main spawnSync fallback: propagates exit code 0 from agy", async () => {
   const io = makeStreams();
+  const calls = [];
   const result = await main(["analyze this"], {
     ...io,
-    _spawnSync: () => ({ error: null, status: 0 }),
+    _spawnSync: fakeSpawnSuccess(calls),
     _loadNodePty: () => null,
   });
   assert.equal(result, 0);
+  assert.deepEqual(calls[1]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
+  assert.equal(calls[2]?.args[0], "--print");
 });
 
 test("main spawnSync fallback: propagates non-zero exit code from agy", async () => {
   const io = makeStreams();
+  let agyCallCount = 0;
   const result = await main(["analyze this"], {
     ...io,
-    _spawnSync: () => ({ error: null, status: 2 }),
+    _spawnSync: (cmd) => {
+      if (cmd === "where" || cmd === "which") {
+        return { status: 0, stdout: "agy\n" };
+      }
+      agyCallCount += 1;
+      return { error: null, status: agyCallCount === 1 ? 0 : 2 };
+    },
     _loadNodePty: () => null,
   });
   assert.equal(result, 2);
@@ -128,12 +160,15 @@ test("main spawnSync fallback: propagates non-zero exit code from agy", async ()
 
 test("main ConPTY: exitCode 0 resolves to 0 and writes output to stdout", async () => {
   const io = makeStreams();
+  const calls = [];
   const result = await main(["analyze this"], {
     ...io,
+    _spawnSync: fakeSpawnSuccess(calls),
     _loadNodePty: () => fakePtyModule({ exitCode: 0, data: "analysis result\n" }),
     _conPtyTimeoutMs: 5_000,
   });
   assert.equal(result, 0);
+  assert.deepEqual(calls[1]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
   assert.match(io.stdout, /analysis result/);
 });
 
@@ -141,6 +176,7 @@ test("main ConPTY: undefined exitCode resolves to 1 (signal-killed)", async () =
   const io = makeStreams();
   const result = await main(["analyze this"], {
     ...io,
+    _spawnSync: fakeSpawnSuccess(),
     _loadNodePty: () => fakePtyModule({ exitCode: undefined }),
     _conPtyTimeoutMs: 5_000,
   });
@@ -151,6 +187,7 @@ test("main ConPTY: timeout rejects, writes timeout message to stderr, returns 1"
   const io = makeStreams();
   const result = await main(["analyze this"], {
     ...io,
+    _spawnSync: fakeSpawnSuccess(),
     _loadNodePty: () => fakePtyModule({ neverExit: true }),
     _conPtyTimeoutMs: 50,
   });

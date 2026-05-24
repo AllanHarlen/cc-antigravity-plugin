@@ -10,6 +10,14 @@ import process from "node:process";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
+export const DEFAULT_AGY_MODEL = "gemini-3.5-flash-medium";
+export const AGY_AGENT_MODELS = Object.freeze([
+  "gemini-3.5-flash-medium",
+  "gemini-3.5-flash-high",
+  "gemini-3.1-pro-low",
+  "claude-4.6-sonnet-thinking",
+  "claude-4.6-opus-thinking",
+]);
 const SUPPORTED_FORMATS = new Set(["text"]);
 const KNOWN_BINARY_EXTENSIONS = new Set([
   ".7z",
@@ -79,12 +87,14 @@ const USAGE = `Usage:
 
 Options:
   --task <text>              Explicit task text.
-  --model <name>             Temporarily set the AGY model for this call.
+  --model <name>             Select the AGY model for this call via agy -i "/model ...".
   --dirs <path,...>          Directories to ingest recursively.
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
   --files <glob,...>         File globs to ingest.
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
+  --interactive              Use agy --prompt-interactive instead of --print.
+  --agent                    Alias for --interactive; intended for AGY workspace-editing sessions.
   --continue, -c             Continue the most recent AGY conversation.
   --conversation <id>        Resume a specific AGY conversation.
   --sandbox                  Enable AGY sandbox mode.
@@ -93,6 +103,8 @@ Options:
   --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
   --print-command            Print the resolved agy command and exit.
   -h, --help                 Show this help message.
+
+Default AGY model: ${DEFAULT_AGY_MODEL}
 `;
 
 function logEvent(event, data = {}) {
@@ -124,6 +136,7 @@ function summarizeParsedArgs(parsed) {
     files: parsed.files,
     format: parsed.format,
     timeout: parsed.timeout,
+    interactive: parsed.interactive,
     continueConversation: parsed.continueConversation,
     conversationId: parsed.conversationId,
     sandbox: parsed.sandbox,
@@ -155,7 +168,7 @@ function summarizeAgyArgs(args) {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     summarized.push(arg);
-    if (arg === "--print" && index + 1 < args.length) {
+    if ((arg === "--print" || arg === "--prompt-interactive") && index + 1 < args.length) {
       summarized.push(`<prompt:${args[index + 1].length} chars>`);
       index += 1;
     }
@@ -165,6 +178,26 @@ function summarizeAgyArgs(args) {
 
 function shouldLogAgyOutput() {
   return process.env.CC_ANTIGRAVITY_LOG_OUTPUT === "1";
+}
+
+function normalizeOptionalString(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || undefined;
+}
+
+export function resolveAgyModel({
+  requestedModel,
+  configuredDefaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL,
+} = {}) {
+  const requested = normalizeOptionalString(requestedModel);
+  if (requested) return requested;
+
+  const configured = normalizeOptionalString(configuredDefaultModel);
+  if (configured && !configured.startsWith("claude-")) {
+    return configured;
+  }
+
+  return DEFAULT_AGY_MODEL;
 }
 
 function splitList(value) {
@@ -224,6 +257,7 @@ export function parseCliArgs(argv) {
     files: [],
     format: "text",
     timeout: undefined,
+    interactive: false,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
@@ -273,6 +307,10 @@ export function parseCliArgs(argv) {
       case "--timeout":
         parsed.timeout = takeOptionValue(argv, index, token);
         index += 1;
+        break;
+      case "--interactive":
+      case "--agent":
+        parsed.interactive = true;
         break;
       case "--continue":
       case "-c":
@@ -526,6 +564,7 @@ ${task}
 export function buildAntigravityArgs({
   prompt,
   timeout,
+  interactive = false,
   continueConversation = false,
   conversationId,
   addDirs = [],
@@ -540,8 +579,12 @@ export function buildAntigravityArgs({
   }
   if (sandbox) args.push("--sandbox");
   if (skipPermissions) args.push("--dangerously-skip-permissions");
-  args.push("--print", prompt);
-  if (timeout) args.push("--print-timeout", timeout);
+  if (interactive) {
+    args.push("--prompt-interactive", prompt);
+  } else {
+    args.push("--print", prompt);
+    if (timeout) args.push("--print-timeout", timeout);
+  }
   return args;
 }
 
@@ -618,46 +661,43 @@ function parseTimeoutMs(timeout) {
   return value;
 }
 
-function getAgySettingsPath() {
-  return path.join(
-    process.env.HOME ?? process.env.USERPROFILE ?? "",
-    ".gemini",
-    "antigravity-cli",
-    "settings.json",
+export function buildAgyModelSelectionArgs(model = DEFAULT_AGY_MODEL) {
+  return ["-i", `/model ${model}`];
+}
+
+function buildAgyMissingError() {
+  return new Error(
+    "Antigravity CLI (agy) is not installed or not on PATH.\n" +
+      "Install it with:\n" +
+      "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
+      "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
+      "Then authenticate by launching `agy` once.",
   );
 }
 
-export async function withModelOverride(model, fn, settingsPath = getAgySettingsPath()) {
-  if (!model) return fn();
-
-  logEvent("model.override.start", { model, settingsPath });
-  let originalSettings = null;
-  let settings = {};
-  try {
-    originalSettings = await fsp.readFile(settingsPath, "utf8");
-    settings = JSON.parse(originalSettings);
-  } catch {
-    settings = {};
+function selectAgyModel(agyExe, model, _spawnSync = spawnSync) {
+  const modelArgs = buildAgyModelSelectionArgs(model);
+  logEvent("agy.model.select.start", { agyExe, args: modelArgs });
+  const result = _spawnSync(agyExe, modelArgs, { stdio: "inherit" });
+  if (result.error) {
+    logEvent("agy.model.select.error", {
+      code: result.error.code,
+      message: result.error.message,
+      model,
+    });
+    if (result.error.code === "ENOENT") {
+      throw buildAgyMissingError();
+    }
+    throw result.error;
   }
 
-  const previousModel = settings.model;
-  settings.model = model;
-  await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
-  await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-
-  try {
-    return await fn();
-  } finally {
-    if (originalSettings !== null) {
-      await fsp.writeFile(settingsPath, originalSettings);
-    } else {
-      delete settings.model;
-      if (previousModel !== undefined) {
-        settings.model = previousModel;
-      }
-      await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    }
-    logEvent("model.override.restore", { model, settingsPath });
+  const status = result.status ?? 1;
+  logEvent("agy.model.select.exit", { status, model });
+  if (status !== 0) {
+    throw new Error(
+      `AGY model selection failed for "${model}" with exit code ${status}. ` +
+        "Run `agy` interactively and check that `/model` accepts this model.",
+    );
   }
 }
 
@@ -720,9 +760,14 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
   });
 }
 
-function printResolvedCommand(args, _stdout = process.stdout) {
+function renderAgyCommand(args) {
   const rendered = ["agy", ...args.map((arg) => JSON.stringify(arg))].join(" ");
-  _stdout.write(rendered + "\n");
+  return rendered;
+}
+
+function printResolvedCommands(modelArgs, agyArgs, _stdout = process.stdout) {
+  _stdout.write(renderAgyCommand(modelArgs) + "\n");
+  _stdout.write(renderAgyCommand(agyArgs) + "\n");
 }
 
 export async function main(argv = process.argv.slice(2), {
@@ -752,11 +797,13 @@ export async function main(argv = process.argv.slice(2), {
     });
     logEvent("bridge.context.collected", summarizeContext(context));
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
-    const model = parsed.model ?? process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL;
+    const model = resolveAgyModel({ requestedModel: parsed.model });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
+    const modelArgs = buildAgyModelSelectionArgs(model);
     const agyArgs = buildAntigravityArgs({
       prompt,
       timeout,
+      interactive: parsed.interactive,
       continueConversation: parsed.continueConversation,
       conversationId: parsed.conversationId,
       addDirs: parsed.addDirs,
@@ -766,60 +813,47 @@ export async function main(argv = process.argv.slice(2), {
     logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), model, timeout });
 
     if (parsed.printCommand) {
-      printResolvedCommand(agyArgs, _stdout);
-      logEvent("bridge.print-command", { args: summarizeAgyArgs(agyArgs) });
+      printResolvedCommands(modelArgs, agyArgs, _stdout);
+      logEvent("bridge.print-command", { modelArgs, args: summarizeAgyArgs(agyArgs) });
       return 0;
     }
 
-    return await withModelOverride(model, async () => {
-      const ptyModule = _loadNodePty();
-      if (ptyModule) {
-        const agyExe = resolveAgyExe(_spawnSync);
-        try {
-          return await spawnViaConPty(
-            agyExe,
-            agyArgs,
-            ptyModule,
-            timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
-            _stdout,
-          );
-        } catch (err) {
-          if (err?.code === "ENOENT" || String(err).includes("not found")) {
-            throw new Error(
-              "Antigravity CLI (agy) is not installed or not on PATH.\n" +
-                "Install it with:\n" +
-                "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
-                "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
-                "Then authenticate by launching `agy` once.",
-            );
-          }
-          throw err;
-        }
-      }
+    const agyExe = resolveAgyExe(_spawnSync);
+    selectAgyModel(agyExe, model, _spawnSync);
 
-      // Fallback for platforms or installs where node-pty is unavailable.
-      const agyExe = resolveAgyExe(_spawnSync);
-      logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
-      const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
-      if (result.error) {
-        logEvent("agy.spawnsync.error", {
-          code: result.error.code,
-          message: result.error.message,
-        });
-        if (result.error.code === "ENOENT") {
-          throw new Error(
-            "Antigravity CLI (agy) is not installed or not on PATH.\n" +
-              "Install it with:\n" +
-              "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
-              "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
-              "Then authenticate by launching `agy` once.",
-          );
+    const ptyModule = _loadNodePty();
+    if (ptyModule) {
+      try {
+        return await spawnViaConPty(
+          agyExe,
+          agyArgs,
+          ptyModule,
+          timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
+          _stdout,
+        );
+      } catch (err) {
+        if (err?.code === "ENOENT" || String(err).includes("not found")) {
+          throw buildAgyMissingError();
         }
-        throw result.error;
+        throw err;
       }
-      logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
-      return result.status ?? 1;
-    });
+    }
+
+    // Fallback for platforms or installs where node-pty is unavailable.
+    logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
+    const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
+    if (result.error) {
+      logEvent("agy.spawnsync.error", {
+        code: result.error.code,
+        message: result.error.message,
+      });
+      if (result.error.code === "ENOENT") {
+        throw buildAgyMissingError();
+      }
+      throw result.error;
+    }
+    logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
+    return result.status ?? 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("bridge.error", { message });

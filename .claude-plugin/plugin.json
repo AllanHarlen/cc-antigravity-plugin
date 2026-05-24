@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.0.1",
+    "version": "3.1.0",
     "description": "Integrate Antigravity CLI (AGY) for long-context code exploration with model selection and conversation continuity",
     "author": {
         "name": "Allan Harlen",
@@ -33,8 +33,8 @@
         "default_model": {
             "type": "string",
             "title": "Default AGY Model",
-            "description": "Model to use when --model is not specified, for example gemini-2.5-pro or gemini-2.5-flash.",
-            "default": "gemini-2.5-pro"
+            "description": "Model to use when --model is not specified. Default Gemini Flash medium is best for most tasks; use gemini-3.1-pro-low for harder reasoning, or pass Claude models explicitly with --model.",
+            "default": "gemini-3.5-flash-medium"
         },
         "timeout": {
             "type": "string",

@@ -52,8 +52,8 @@ Always prefer the shared bridge script over hand-written `agy` commands:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] -- "<task>"
 ```
 
-The bridge owns argument parsing, file ingestion, prompt assembly, model
-override, conversation flags, and AGY invocation.
+The bridge owns argument parsing, file ingestion, prompt assembly, AGY model
+selection through `agy -i "/model ..."`, conversation flags, and AGY invocation.
 
 ## Bridge Options
 
@@ -62,15 +62,21 @@ override, conversation flags, and AGY invocation.
 | `--dirs <path,...>` | Inline directories into the bridge prompt |
 | `--files <glob,...>` | Inline targeted globs and mixed data formats |
 | `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
-| `--model <name>` | Temporarily set the AGY model and restore settings after execution |
+| `--model <name>` | Select the AGY model via `agy -i "/model ..."` before execution |
 | `--continue`, `-c` | Continue the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation |
 | `--timeout <duration>` | Forward `--print-timeout` to AGY |
+| `--agent`, `--interactive` | Use AGY `--prompt-interactive` for an agent-style workspace session |
 | `--sandbox` | Enable AGY sandbox mode |
 | `--skip-permissions` | Forward AGY `--dangerously-skip-permissions` |
 | `--print-command` | Inspect the resolved AGY command without running it |
 
 `--format json` is not supported; AGY headless mode returns text.
+
+Default model behavior:
+- Omit `--model` for `gemini-3.5-flash-medium`, the default for most tasks.
+- Use `gemini-3.1-pro-low` for higher-reasoning tasks.
+- Use `claude-4.6-sonnet-thinking` or `claude-4.6-opus-thinking` only when the user explicitly asks for that Claude model.
 
 ## Good Patterns
 
@@ -88,6 +94,13 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --add-dir src --conti
   "Analyze the impact of refactoring the auth module. Include affected files and migration steps."
 ```
 
+### Workspace agent
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --agent --add-dir . \
+  "Act as an AGY workspace agent and create relatorio-impostos.html."
+```
+
 ### Structured data
 
 ```bash
@@ -101,6 +114,6 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --files "schemas/**/*
 |-------|----------|
 | Authentication error | Launch `agy` once interactively and sign in. |
 | AGY missing on PATH | macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash`  Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
-| Model override failed | Set the model in AGY with `/model`, then retry without `--model`. |
+| Model selection failed | Launch `agy` interactively and confirm `/model <name>` accepts the requested model. |
 | Rate limiting | Retry with a narrower task or smaller context set. |
 | Token pressure | Reduce the number of inlined files. |

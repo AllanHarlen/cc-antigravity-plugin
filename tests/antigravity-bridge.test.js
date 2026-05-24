@@ -5,20 +5,22 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  DEFAULT_AGY_MODEL,
   buildAntigravityArgs,
   buildAntigravityPrompt,
+  buildAgyModelSelectionArgs,
   collectContextFiles,
   parseCliArgs,
+  resolveAgyModel,
   resolveAgyExe,
   spawnViaConPty,
   stripAnsi,
-  withModelOverride,
 } from "../scripts/antigravity-bridge.js";
 
 test("parseCliArgs parses model, dirs, files, and positional task", () => {
   const parsed = parseCliArgs([
     "--model",
-    "gemini-2.5-pro",
+    "gemini-3.5-flash-high",
     "--dirs",
     "src,lib",
     "--files",
@@ -31,12 +33,13 @@ test("parseCliArgs parses model, dirs, files, and positional task", () => {
   ]);
 
   assert.deepEqual(parsed, {
-    model: "gemini-2.5-pro",
+    model: "gemini-3.5-flash-high",
     dirs: ["src", "lib"],
     addDirs: [],
     files: ["**/*.json", "docs/**/*.md"],
     format: "text",
     timeout: undefined,
+    interactive: false,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
@@ -47,6 +50,28 @@ test("parseCliArgs parses model, dirs, files, and positional task", () => {
     help: false,
     task: "analyze the workspace",
   });
+});
+
+test("resolveAgyModel defaults to Gemini Flash medium when no model is selected", () => {
+  assert.equal(resolveAgyModel(), DEFAULT_AGY_MODEL);
+});
+
+test("resolveAgyModel allows Claude only when passed as the requested model", () => {
+  assert.equal(
+    resolveAgyModel({ requestedModel: "claude-4.6-opus-thinking" }),
+    "claude-4.6-opus-thinking",
+  );
+  assert.equal(
+    resolveAgyModel({ configuredDefaultModel: "claude-4.6-sonnet-thinking" }),
+    DEFAULT_AGY_MODEL,
+  );
+});
+
+test("buildAgyModelSelectionArgs uses AGY interactive model command", () => {
+  assert.deepEqual(buildAgyModelSelectionArgs("gemini-3.1-pro-low"), [
+    "-i",
+    "/model gemini-3.1-pro-low",
+  ]);
 });
 
 test("collectContextFiles loads supported text data and skips unsupported files", async () => {
@@ -142,9 +167,29 @@ test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {
 });
 
 test("buildAntigravityArgs does not forward model or format to AGY", () => {
-  const args = buildAntigravityArgs({ prompt: "x", model: "gemini-2.5-pro", format: "json" });
+  const args = buildAntigravityArgs({ prompt: "x", model: "gemini-3.1-pro-low", format: "json" });
   assert.equal(args.length, 2);
   assert.ok(!args.some((a) => a.startsWith("--model") || a.startsWith("--format")));
+});
+
+test("buildAntigravityArgs supports interactive agent mode", () => {
+  const args = buildAntigravityArgs({
+    prompt: "<task>Create a file</task>",
+    interactive: true,
+    addDirs: ["."],
+    skipPermissions: true,
+    timeout: "3m",
+  });
+
+  assert.deepEqual(args, [
+    "--add-dir",
+    ".",
+    "--dangerously-skip-permissions",
+    "--prompt-interactive",
+    "<task>Create a file</task>",
+  ]);
+  assert.ok(!args.includes("--print"));
+  assert.ok(!args.includes("--print-timeout"));
 });
 
 test("buildAntigravityPrompt escapes </file> closing tags in file content", () => {
@@ -228,6 +273,7 @@ test("parseCliArgs parses AGY passthrough and conversation flags", () => {
     "conv-1",
     "--sandbox",
     "--skip-permissions",
+    "--agent",
     "task",
   ]);
 
@@ -237,6 +283,7 @@ test("parseCliArgs parses AGY passthrough and conversation flags", () => {
   assert.equal(parsed.conversationId, "conv-1");
   assert.equal(parsed.sandbox, true);
   assert.equal(parsed.skipPermissions, true);
+  assert.equal(parsed.interactive, true);
 });
 
 test("parseCliArgs --max-files and --max-file-bytes accept custom values", () => {
@@ -417,23 +464,6 @@ test("buildAntigravityPrompt lists all skipped files in inventory", () => {
   });
   assert.match(prompt, /image\.png \(unsupported-extension\)/);
   assert.match(prompt, /huge\.bin \(unsupported-extension\)/);
-});
-
-test("withModelOverride temporarily writes and restores AGY settings", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-settings-"));
-  const settingsPath = path.join(tempDir, "settings.json");
-  await fs.writeFile(settingsPath, JSON.stringify({ model: "gemini-2.5-pro", other: true }, null, 2));
-
-  let settingsDuringRun;
-  const result = await withModelOverride("gemini-2.5-flash", async () => {
-    settingsDuringRun = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-    return 42;
-  }, settingsPath);
-
-  const restored = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-  assert.equal(result, 42);
-  assert.equal(settingsDuringRun.model, "gemini-2.5-flash");
-  assert.deepEqual(restored, { model: "gemini-2.5-pro", other: true });
 });
 
 test("resolveAgyExe returns the first discovered agy executable", () => {

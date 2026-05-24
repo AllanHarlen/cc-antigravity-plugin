@@ -38,7 +38,7 @@ and Codex.
 - argument parsing
 - file and directory ingestion
 - structured prompt assembly
-- model override through AGY settings
+- model selection through `agy -i "/model ..."`
 - Antigravity CLI invocation
 
 ## Task Fit
@@ -64,9 +64,12 @@ Do not use Antigravity for:
    - `--files` for precise globs or mixed data sources
    - `--add-dir` when AGY should receive a directory through its native workspace support
 3. Add optional runtime flags only when they help: `--model`, `--continue`,
-   `--conversation`, `--timeout`, `--sandbox`, or `--skip-permissions`.
-4. Do not add `--format json`; AGY headless mode returns text.
-5. Execute one bridge command and return the findings clearly.
+   `--conversation`, `--timeout`, `--agent`, `--sandbox`, or `--skip-permissions`.
+4. If no AGY model is requested, omit `--model`; the bridge defaults to `gemini-3.5-flash-medium`.
+5. Use `gemini-3.1-pro-low` for tasks that clearly need deeper reasoning.
+6. Use Claude models only when the user explicitly asks for `claude-4.6-sonnet-thinking` or `claude-4.6-opus-thinking`.
+7. Do not add `--format json`; AGY headless mode returns text.
+8. Execute one bridge command and return the findings clearly.
 
 ## Command Patterns
 
@@ -91,7 +94,13 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --add-dir src -- "<TA
 With model and conversation continuity:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --model gemini-2.5-flash --continue -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --model gemini-3.1-pro-low --continue -- "<TASK>"
+```
+
+Agent workspace session:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --agent --add-dir . -- "<TASK>"
 ```
 
 ## Prompting Guidance
@@ -110,5 +119,5 @@ Good prompt patterns:
 
 - If Antigravity CLI is missing, report the install guidance from the bridge output.
 - If the context is too large, narrow the inlined scope with fewer directories or more specific globs.
-- If a model override fails, tell the user to set the model inside AGY with `/model` and retry.
+- If model selection fails, tell the user to run `agy` interactively and confirm `/model <name>` accepts the requested model.
 - If the request does not need Antigravity, hand the task back to Claude rather than forcing the detour.

@@ -66,10 +66,11 @@ $antigravity-integration
 | `--dirs <path,...>` | Injeta diretorios recursivamente no prompt do bridge |
 | `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por virgula |
 | `--add-dir <path>` | Repassa o `--add-dir` nativo do AGY; pode ser repetido |
-| `--model <name>` | Define temporariamente o modelo do AGY e restaura as configuracoes depois |
+| `--model <name>` | Seleciona o modelo do AGY via `agy -i "/model ..."` antes da execucao |
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
 | `--conversation <id>` | Retoma uma conversa especifica do AGY |
 | `--timeout <duration>` | Repassa `--print-timeout` ao AGY, por exemplo `3m` |
+| `--agent`, `--interactive` | Usa `--prompt-interactive` para abrir uma sessao AGY agente |
 | `--sandbox` | Ativa o modo sandbox do AGY |
 | `--skip-permissions` | Repassa `--dangerously-skip-permissions` ao AGY |
 | `--max-files <n>` | Numero maximo de arquivos injetados, padrao `40` |
@@ -79,6 +80,16 @@ $antigravity-integration
 `--format json` nao e suportado porque o modo headless `--print` do AGY retorna
 texto.
 
+Modelos recomendados:
+
+| Modelo | Uso |
+|--------|-----|
+| `gemini-3.5-flash-medium` | Padrao quando `--model` nao e informado; maioria das atividades |
+| `gemini-3.5-flash-high` | Flash com mais esforco para tarefas um pouco mais exigentes |
+| `gemini-3.1-pro-low` | Atividades de maior raciocinio |
+| `claude-4.6-sonnet-thinking` | Somente quando passado explicitamente com `--model` |
+| `claude-4.6-opus-thinking` | Somente quando passado explicitamente com `--model` |
+
 ## Exemplos
 
 ```bash
@@ -87,13 +98,18 @@ texto.
 ```
 
 ```bash
-/cc-antigravity-plugin:antigravity --add-dir src --model gemini-2.5-flash \
+/cc-antigravity-plugin:antigravity --add-dir src --model gemini-3.1-pro-low \
   "Analise o impacto de refatorar o modulo de auth."
 ```
 
 ```bash
 /cc-antigravity-plugin:antigravity --continue --timeout 5m \
   "Resuma o plano de migracao da resposta anterior."
+```
+
+```bash
+/cc-antigravity-plugin:antigravity --agent --add-dir . --skip-permissions \
+  "Atue como agente no workspace e crie relatorio-impostos.html com um relatorio HTML sobre impostos no Brasil."
 ```
 
 ```bash
@@ -109,8 +125,9 @@ O bridge compartilhado em `scripts/antigravity-bridge.js`:
 3. Filtra caminhos ignorados e arquivos binarios.
 4. Monta um prompt estruturado com inventario, payloads inline, tarefa e restricoes.
 5. Mapeia flags nativas do AGY como `--add-dir`, `--continue`, `--conversation`,
-   `--sandbox`, `--dangerously-skip-permissions` e `--print-timeout`.
-6. Aplica `--model` atualizando temporariamente `~/.gemini/antigravity-cli/settings.json`.
+   `--prompt-interactive`, `--sandbox`, `--dangerously-skip-permissions` e
+   `--print-timeout`.
+6. Seleciona o modelo com `agy -i "/model <modelo>"`; se nada for informado, usa `gemini-3.5-flash-medium`.
 7. Executa o AGY via `node-pty` quando disponivel e faz streaming do output conforme
    ele chega, com fallback para `spawnSync`.
 
@@ -169,7 +186,7 @@ Dentro do Claude Code, rode um ciclo pequeno:
 ```
 
 O log registra eventos como parse de argumentos, arquivos coletados, flags
-repassadas ao AGY, override/restauracao de modelo, inicio/fim da execucao e
+repassadas ao AGY, selecao de modelo, inicio/fim da execucao e
 erros. O prompt completo nao e gravado; o log mostra apenas o tamanho dele.
 
 ## Solucao de Problemas
@@ -178,7 +195,7 @@ erros. O prompt completo nao e gravado; o log mostra apenas o tamanho dele.
 |----------|---------|
 | Erro de autenticacao | Rode `agy` interativamente e faca login. |
 | `agy` nao encontrado | Rode o instalador do AGY novamente e confirme que o binario esta no PATH. |
-| Override de modelo falhou | Defina o modelo dentro do AGY com `/model` e tente novamente sem `--model`. |
+| Selecao de modelo falhou | Rode `agy` interativamente e confirme que `/model <nome>` aceita o modelo solicitado. |
 | Pressao de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
 | Timeout | Aumente `--timeout`, reduza o contexto ou deixe a tarefa mais direta. |
 
