@@ -5,24 +5,18 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  DEFAULT_AGY_MODEL,
   buildAntigravityArgs,
   buildAntigravityPrompt,
-  buildAgyModelSelectionArgs,
   checkAgyConnectivity,
   collectContextFiles,
   parseCliArgs,
-  resolveAgyModel,
   resolveAgyExe,
-  selectAgyModelViaPty,
   spawnViaConPty,
   stripAnsi,
 } from "../scripts/antigravity-bridge.js";
 
-test("parseCliArgs parses model, dirs, files, and positional task", () => {
+test("parseCliArgs parses dirs, files, and positional task", () => {
   const parsed = parseCliArgs([
-    "--model",
-    "gemini-3.5-flash-high",
     "--dirs",
     "src,lib",
     "--files",
@@ -35,7 +29,6 @@ test("parseCliArgs parses model, dirs, files, and positional task", () => {
   ]);
 
   assert.deepEqual(parsed, {
-    model: "gemini-3.5-flash-high",
     dirs: ["src", "lib"],
     addDirs: [],
     files: ["**/*.json", "docs/**/*.md"],
@@ -54,27 +47,6 @@ test("parseCliArgs parses model, dirs, files, and positional task", () => {
   });
 });
 
-test("resolveAgyModel defaults to Gemini Flash medium when no model is selected", () => {
-  assert.equal(resolveAgyModel(), DEFAULT_AGY_MODEL);
-});
-
-test("resolveAgyModel allows Claude only when passed as the requested model", () => {
-  assert.equal(
-    resolveAgyModel({ requestedModel: "claude-4.6-opus-thinking" }),
-    "claude-4.6-opus-thinking",
-  );
-  assert.equal(
-    resolveAgyModel({ configuredDefaultModel: "claude-4.6-sonnet-thinking" }),
-    DEFAULT_AGY_MODEL,
-  );
-});
-
-test("buildAgyModelSelectionArgs uses AGY interactive model command", () => {
-  assert.deepEqual(buildAgyModelSelectionArgs("gemini-3.1-pro-low"), [
-    "-i",
-    "/model gemini-3.1-pro-low",
-  ]);
-});
 
 test("collectContextFiles loads supported text data and skips unsupported files", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-bridge-"));
@@ -312,7 +284,7 @@ test("parseCliArgs throws on --max-files 0", () => {
 });
 
 test("parseCliArgs throws when flag has no value", () => {
-  assert.throws(() => parseCliArgs(["--model"]), /missing value/i);
+  assert.throws(() => parseCliArgs(["--timeout"]), /missing value/i);
 });
 
 // ─── stripAnsi ────────────────────────────────────────────────────────────────
@@ -529,55 +501,3 @@ test("checkAgyConnectivity: exit 0 returns without throwing", () => {
   assert.doesNotThrow(() => checkAgyConnectivity("agy", fakeSpawn));
 });
 
-// ─── selectAgyModelViaPty ─────────────────────────────────────────────────────
-
-function fakePtyForModelSelect(opts = {}) {
-  const { exitCode = 0, dataChunks = ["AGY ready> "], delayMs = 10 } = opts;
-  return {
-    spawn: (_exe, _args, _opts) => {
-      const dataHandlers = [];
-      const exitHandlers = [];
-      let inputReceived = "";
-      const term = {
-        onData: (fn) => { dataHandlers.push(fn); },
-        onExit: (fn) => { exitHandlers.push(fn); },
-        write: (data) => { inputReceived += data; },
-        kill: () => {},
-        get _input() { return inputReceived; },
-      };
-      setTimeout(() => {
-        for (const chunk of dataChunks) dataHandlers.forEach((fn) => fn(chunk));
-        setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode })), delayMs);
-      }, delayMs);
-      return term;
-    },
-  };
-}
-
-test("selectAgyModelViaPty: resolves when AGY exits 0", async () => {
-  const pty = fakePtyForModelSelect({ exitCode: 0 });
-  await assert.doesNotReject(() => selectAgyModelViaPty("agy", "gemini-3.5-flash-medium", pty, 5_000));
-});
-
-test("selectAgyModelViaPty: rejects on non-zero exit code", async () => {
-  const pty = fakePtyForModelSelect({ exitCode: 2, dataChunks: ["error\n"] });
-  await assert.rejects(
-    () => selectAgyModelViaPty("agy", "gemini-3.5-flash-medium", pty, 5_000),
-    /exited with code 2/,
-  );
-});
-
-test("selectAgyModelViaPty: rejects on timeout", async () => {
-  const pty = {
-    spawn: () => ({
-      onData: () => {},
-      onExit: () => {},
-      write: () => {},
-      kill: () => {},
-    }),
-  };
-  await assert.rejects(
-    () => selectAgyModelViaPty("agy", "gemini-3.5-flash-medium", pty, 50),
-    /timed out/i,
-  );
-});

@@ -10,14 +10,6 @@ import process from "node:process";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
-export const DEFAULT_AGY_MODEL = "gemini-3.5-flash-medium";
-export const AGY_AGENT_MODELS = Object.freeze([
-  "gemini-3.5-flash-medium",
-  "gemini-3.5-flash-high",
-  "gemini-3.1-pro-low",
-  "claude-4.6-sonnet-thinking",
-  "claude-4.6-opus-thinking",
-]);
 const SUPPORTED_FORMATS = new Set(["text"]);
 const KNOWN_BINARY_EXTENSIONS = new Set([
   ".7z",
@@ -87,8 +79,6 @@ const USAGE = `Usage:
 
 Options:
   --task <text>              Explicit task text.
-  --model <name>             Preferred model (shown in --print-command as manual setup steps).
-                             AGY v1.0.2 has no headless --model flag; set it via \`agy\` interactively.
   --dirs <path,...>          Directories to ingest recursively.
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
   --files <glob,...>         File globs to ingest.
@@ -105,8 +95,6 @@ Options:
   --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
   --print-command            Print the resolved agy command and exit.
   -h, --help                 Show this help message.
-
-Default AGY model: ${DEFAULT_AGY_MODEL}
 
 Logging:
   Plugin events are always written to a JSONL log file.
@@ -151,7 +139,6 @@ function logEvent(event, data = {}) {
 
 function summarizeParsedArgs(parsed) {
   return {
-    model: parsed.model,
     dirs: parsed.dirs,
     addDirs: parsed.addDirs,
     files: parsed.files,
@@ -199,26 +186,6 @@ function summarizeAgyArgs(args) {
 
 function shouldLogAgyOutput() {
   return process.env.CC_ANTIGRAVITY_LOG_OUTPUT === "1";
-}
-
-function normalizeOptionalString(value) {
-  const normalized = String(value ?? "").trim();
-  return normalized || undefined;
-}
-
-export function resolveAgyModel({
-  requestedModel,
-  configuredDefaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL,
-} = {}) {
-  const requested = normalizeOptionalString(requestedModel);
-  if (requested) return requested;
-
-  const configured = normalizeOptionalString(configuredDefaultModel);
-  if (configured && !configured.startsWith("claude-")) {
-    return configured;
-  }
-
-  return DEFAULT_AGY_MODEL;
 }
 
 function splitList(value) {
@@ -272,7 +239,6 @@ function takeOptionValue(argv, index, flagName) {
 
 export function parseCliArgs(argv) {
   const parsed = {
-    model: undefined,
     dirs: [],
     addDirs: [],
     files: [],
@@ -307,10 +273,6 @@ export function parseCliArgs(argv) {
         break;
       case "--task":
         parsed.task = takeOptionValue(argv, index, token);
-        index += 1;
-        break;
-      case "--model":
-        parsed.model = takeOptionValue(argv, index, token);
         index += 1;
         break;
       case "--dirs":
@@ -682,10 +644,6 @@ function parseTimeoutMs(timeout) {
   return value;
 }
 
-export function buildAgyModelSelectionArgs(model = DEFAULT_AGY_MODEL) {
-  return ["-i", `/model ${model}`];
-}
-
 function buildAgyMissingError() {
   return new Error(
     "Antigravity CLI (agy) is not installed or not on PATH.\n" +
@@ -725,108 +683,7 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
   }
 }
 
-function selectAgyModel(agyExe, model, _spawnSync = spawnSync) {
-  const modelArgs = buildAgyModelSelectionArgs(model);
-  logEvent("agy.model.select.start", { agyExe, args: modelArgs });
-  const result = _spawnSync(agyExe, modelArgs, { stdio: "inherit" });
-  if (result.error) {
-    logEvent("agy.model.select.error", {
-      code: result.error.code,
-      message: result.error.message,
-      model,
-    });
-    if (result.error.code === "ENOENT") {
-      throw buildAgyMissingError();
-    }
-    throw result.error;
-  }
 
-  const status = result.status ?? 1;
-  logEvent("agy.model.select.exit", { status, model });
-  if (status !== 0) {
-    throw new Error(
-      `AGY model selection failed for "${model}" with exit code ${status}. ` +
-        "Run `agy` interactively and check that `/model` accepts this model.",
-    );
-  }
-}
-
-// Selects the AGY model by spawning an interactive session via PTY, sending
-// the /model command, then closing with Ctrl+C. Required because AGY v1.0.2
-// has no headless --model flag and -i hangs without a real TTY.
-export async function selectAgyModelViaPty(agyExe, model, pty, timeoutMs = 15_000) {
-  logEvent("agy.model.select.start", { agyExe, model, method: "pty" });
-  return new Promise((resolve, reject) => {
-    let term;
-    let settled = false;
-    let commandSent = false;
-    let exitSent = false;
-    let output = "";
-
-    const settle = (ok, reason) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { term?.kill(); } catch {}
-      if (ok) {
-        logEvent("agy.model.select.exit", { model, ok: true });
-        resolve();
-      } else {
-        logEvent("agy.model.select.error", { model, reason });
-        reject(new Error(reason ?? `Model selection via PTY failed for "${model}"`));
-      }
-    };
-
-    const sendCommand = () => {
-      if (commandSent) return;
-      commandSent = true;
-      logEvent("agy.model.select.command", { model });
-      try { term.write(`/model ${model}\n`); } catch {}
-      // After a short delay send /exit to close the interactive session.
-      setTimeout(() => {
-        if (exitSent) return;
-        exitSent = true;
-        try { term.write("/exit\n"); } catch {}
-      }, 1_500);
-    };
-
-    // Fallback: send command after 3s regardless of output.
-    const fallbackTimer = setTimeout(sendCommand, 3_000);
-
-    const timer = setTimeout(() => {
-      clearTimeout(fallbackTimer);
-      settle(false, `Model selection timed out after ${timeoutMs}ms for "${model}"`);
-    }, timeoutMs);
-
-    try {
-      term = pty.spawn(agyExe, [], {
-        name: "xterm-color",
-        cols: 120,
-        rows: 30,
-      });
-
-      term.onData((chunk) => {
-        output += stripAnsi(chunk);
-        if (shouldLogAgyOutput()) logEvent("agy.model.select.output", { chunk });
-        // Send command as soon as AGY produces any output (it's ready).
-        if (!commandSent) {
-          clearTimeout(fallbackTimer);
-          setTimeout(sendCommand, 300);
-        }
-      });
-
-      term.onExit(({ exitCode }) => {
-        settle(exitCode === 0 || exitCode == null,
-          exitCode !== 0 && exitCode != null
-            ? `AGY exited with code ${exitCode} during model selection`
-            : null);
-      });
-    } catch (err) {
-      clearTimeout(fallbackTimer);
-      settle(false, err.message);
-    }
-  });
-}
 
 // PTY merges stdout and stderr into a single stream by design; agy error output
 // (auth failures, rate limits) will appear in the same stream as the response body.
@@ -892,10 +749,7 @@ function renderAgyCommand(args) {
   return rendered;
 }
 
-function printResolvedCommands(modelArgs, agyArgs, _stdout = process.stdout) {
-  _stdout.write(`# Run this manually in an interactive terminal to set the model:\n`);
-  _stdout.write(renderAgyCommand(modelArgs) + "\n");
-  _stdout.write(`# Then run:\n`);
+function printResolvedCommands(agyArgs, _stdout = process.stdout) {
   _stdout.write(renderAgyCommand(agyArgs) + "\n");
 }
 
@@ -927,9 +781,7 @@ export async function main(argv = process.argv.slice(2), {
     });
     logEvent("bridge.context.collected", summarizeContext(context));
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
-    const model = resolveAgyModel({ requestedModel: parsed.model });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
-    const modelArgs = buildAgyModelSelectionArgs(model);
     const agyArgs = buildAntigravityArgs({
       prompt,
       timeout,
@@ -940,11 +792,11 @@ export async function main(argv = process.argv.slice(2), {
       sandbox: parsed.sandbox,
       skipPermissions: parsed.skipPermissions,
     });
-    logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), model, timeout });
+    logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout });
 
     if (parsed.printCommand) {
-      printResolvedCommands(modelArgs, agyArgs, _stdout);
-      logEvent("bridge.print-command", { modelArgs, args: summarizeAgyArgs(agyArgs) });
+      printResolvedCommands(agyArgs, _stdout);
+      logEvent("bridge.print-command", { args: summarizeAgyArgs(agyArgs) });
       return 0;
     }
 
@@ -952,12 +804,6 @@ export async function main(argv = process.argv.slice(2), {
     checkAgyConnectivity(agyExe, _spawnSync);
 
     const ptyModule = _loadNodePty();
-
-    if (ptyModule) {
-      await selectAgyModelViaPty(agyExe, model, ptyModule);
-    } else {
-      logEvent("agy.model.select.skipped", { model, reason: "node-pty unavailable" });
-    }
 
     if (parsed.interactive) {
       if (!ptyModule) {
