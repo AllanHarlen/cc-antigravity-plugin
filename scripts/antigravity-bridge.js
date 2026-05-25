@@ -94,6 +94,7 @@ Options:
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
+                             Requires PTY support and an interactive terminal (TTY).
   --agent                    Alias for --interactive; intended for AGY workspace-editing sessions.
   --continue, -c             Continue the most recent AGY conversation.
   --conversation <id>        Resume a specific AGY conversation.
@@ -105,12 +106,31 @@ Options:
   -h, --help                 Show this help message.
 
 Default AGY model: ${DEFAULT_AGY_MODEL}
+
+Logging:
+  Plugin events are always written to a JSONL log file.
+    Windows:     %LOCALAPPDATA%\\agy\\cc-plugin-logs\\plugin-YYYY-MM-DD.jsonl
+    macOS/Linux: ~/.local/share/agy/cc-plugin-logs/plugin-YYYY-MM-DD.jsonl
+  Override:      CC_ANTIGRAVITY_LOG_PATH=<path>
+  Include output chunks in log: CC_ANTIGRAVITY_LOG_OUTPUT=1
 `;
 
-function logEvent(event, data = {}) {
-  const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH;
-  if (!logPath) return;
+function resolveDefaultLogPath() {
+  const isWin = process.platform === "win32";
+  const date = new Date().toISOString().slice(0, 10);
+  const baseDir = isWin
+    ? path.join(
+        process.env.LOCALAPPDATA ??
+          path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+        "agy",
+        "cc-plugin-logs",
+      )
+    : path.join(process.env.HOME ?? "", ".local", "share", "agy", "cc-plugin-logs");
+  return path.join(baseDir, `plugin-${date}.jsonl`);
+}
 
+function logEvent(event, data = {}) {
+  const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH || resolveDefaultLogPath();
   try {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     fs.appendFileSync(
@@ -675,6 +695,35 @@ function buildAgyMissingError() {
   );
 }
 
+export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
+  const result = _spawnSync(agyExe, ["--version"], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 5_000,
+  });
+
+  if (result.error) {
+    logEvent("agy.connectivity.check", { agyExe, ok: false, errorCode: result.error.code });
+    if (result.error.code === "ENOENT") {
+      throw buildAgyMissingError();
+    }
+    throw result.error;
+  }
+
+  const version = result.stdout?.trim() || result.stderr?.trim() || "(unknown)";
+  const ok = result.status === 0;
+
+  logEvent("agy.connectivity.check", { agyExe, ok, version, exitCode: result.status });
+
+  if (!ok) {
+    throw new Error(
+      `Antigravity CLI responded with exit code ${result.status} to --version. ` +
+        "It may require authentication — run `agy` once interactively to complete setup.\n" +
+        `Binary: ${agyExe}`,
+    );
+  }
+}
+
 function selectAgyModel(agyExe, model, _spawnSync = spawnSync) {
   const modelArgs = buildAgyModelSelectionArgs(model);
   logEvent("agy.model.select.start", { agyExe, args: modelArgs });
@@ -776,6 +825,7 @@ export async function main(argv = process.argv.slice(2), {
   _conPtyTimeoutMs = CONPTY_TIMEOUT_MS,
   _stdout = process.stdout,
   _stderr = process.stderr,
+  _isTTY = Boolean(process.stdout.isTTY),
 } = {}) {
   try {
     logEvent("bridge.start", { argv });
@@ -819,9 +869,28 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     const agyExe = resolveAgyExe(_spawnSync);
+    checkAgyConnectivity(agyExe, _spawnSync);
     selectAgyModel(agyExe, model, _spawnSync);
 
     const ptyModule = _loadNodePty();
+
+    if (parsed.interactive) {
+      if (!ptyModule) {
+        throw new Error(
+          "--agent/--interactive requires PTY support (node-pty) which is not available in this environment.\n" +
+            "Use the default headless mode (omit --agent/--interactive) or run AGY directly in an interactive terminal.",
+        );
+      }
+      if (!_isTTY) {
+        logEvent("bridge.interactive.no-tty");
+        _stderr.write(
+          "Warning: --agent/--interactive is running without a terminal (no TTY detected). " +
+            "AGY may hang waiting for user input. " +
+            "Use the default headless mode unless you have an interactive terminal attached.\n",
+        );
+      }
+    }
+
     if (ptyModule) {
       try {
         return await spawnViaConPty(
@@ -857,7 +926,8 @@ export async function main(argv = process.argv.slice(2), {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("bridge.error", { message });
-    _stderr.write(message + "\n");
+    const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH || resolveDefaultLogPath();
+    _stderr.write(`${message}\nPlugin log: ${logPath}\n`);
     return 1;
   }
 }

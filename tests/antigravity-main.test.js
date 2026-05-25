@@ -135,8 +135,9 @@ test("main spawnSync fallback: propagates exit code 0 from agy", async () => {
     _loadNodePty: () => null,
   });
   assert.equal(result, 0);
-  assert.deepEqual(calls[1]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
-  assert.equal(calls[2]?.args[0], "--print");
+  // calls[0]=where, calls[1]=--version (connectivity), calls[2]=model select, calls[3]=--print
+  assert.deepEqual(calls[2]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
+  assert.equal(calls[3]?.args[0], "--print");
 });
 
 test("main spawnSync fallback: propagates non-zero exit code from agy", async () => {
@@ -149,7 +150,8 @@ test("main spawnSync fallback: propagates non-zero exit code from agy", async ()
         return { status: 0, stdout: "agy\n" };
       }
       agyCallCount += 1;
-      return { error: null, status: agyCallCount === 1 ? 0 : 2 };
+      // calls: 1=--version (connectivity), 2=model select, 3=actual task
+      return { error: null, status: agyCallCount <= 2 ? 0 : 2 };
     },
     _loadNodePty: () => null,
   });
@@ -168,7 +170,8 @@ test("main ConPTY: exitCode 0 resolves to 0 and writes output to stdout", async 
     _conPtyTimeoutMs: 5_000,
   });
   assert.equal(result, 0);
-  assert.deepEqual(calls[1]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
+  // calls[0]=where, calls[1]=--version (connectivity), calls[2]=model select
+  assert.deepEqual(calls[2]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
   assert.match(io.stdout, /analysis result/);
 });
 
@@ -193,4 +196,55 @@ test("main ConPTY: timeout rejects, writes timeout message to stderr, returns 1"
   });
   assert.equal(result, 1);
   assert.match(io.stderr, /did not respond/i);
+});
+
+// ─── --agent / --interactive guards ──────────────────────────────────────────
+
+test("main --agent without PTY support fails with clear error", async () => {
+  const io = makeStreams();
+  const result = await main(["--agent", "do something"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => null,
+  });
+  assert.equal(result, 1);
+  assert.match(io.stderr, /PTY support/i);
+});
+
+test("main --agent with PTY but no TTY warns and continues", async () => {
+  const io = makeStreams();
+  const result = await main(["--agent", "do something"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => fakePtyModule({ exitCode: 0, data: "done\n" }),
+    _isTTY: false,
+    _conPtyTimeoutMs: 5_000,
+  });
+  assert.match(io.stderr, /no TTY/i);
+  assert.equal(result, 0);
+});
+
+test("main --agent with PTY and TTY does not warn", async () => {
+  const io = makeStreams();
+  const result = await main(["--agent", "do something"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => fakePtyModule({ exitCode: 0 }),
+    _isTTY: true,
+    _conPtyTimeoutMs: 5_000,
+  });
+  assert.doesNotMatch(io.stderr, /no TTY/i);
+  assert.equal(result, 0);
+});
+
+// ─── error surfacing ──────────────────────────────────────────────────────────
+
+test("main error output includes plugin log path", async () => {
+  const io = makeStreams();
+  await main(["trigger error"], {
+    ...io,
+    _spawnSync: () => ({ error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null }),
+    _loadNodePty: () => null,
+  });
+  assert.match(io.stderr, /Plugin log:/i);
 });

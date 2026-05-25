@@ -9,6 +9,7 @@ import {
   buildAntigravityArgs,
   buildAntigravityPrompt,
   buildAgyModelSelectionArgs,
+  checkAgyConnectivity,
   collectContextFiles,
   parseCliArgs,
   resolveAgyModel,
@@ -499,4 +500,30 @@ test("spawnViaConPty streams chunks incrementally", async () => {
 
   assert.equal(exitCode, 0);
   assert.deepEqual(writes, ["first", " second", "\n"]);
+});
+
+// ─── checkAgyConnectivity ─────────────────────────────────────────────────────
+
+test("checkAgyConnectivity: ENOENT throws missing-install error", () => {
+  const fakeSpawn = () => ({
+    error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
+    status: null,
+  });
+  assert.throws(() => checkAgyConnectivity("agy", fakeSpawn), /not installed/i);
+});
+
+test("checkAgyConnectivity: non-ENOENT spawn error is re-thrown with original code", () => {
+  const accessErr = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+  const fakeSpawn = () => ({ error: accessErr, status: null });
+  assert.throws(() => checkAgyConnectivity("agy", fakeSpawn), /EACCES/);
+});
+
+test("checkAgyConnectivity: non-zero exit code throws authentication hint", () => {
+  const fakeSpawn = () => ({ error: null, status: 1, stdout: "", stderr: "auth required" });
+  assert.throws(() => checkAgyConnectivity("agy", fakeSpawn), /authentication/i);
+});
+
+test("checkAgyConnectivity: exit 0 returns without throwing", () => {
+  const fakeSpawn = () => ({ error: null, status: 0, stdout: "agy 1.2.3", stderr: "" });
+  assert.doesNotThrow(() => checkAgyConnectivity("agy", fakeSpawn));
 });
