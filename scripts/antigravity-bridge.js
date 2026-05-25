@@ -727,7 +727,14 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
 function selectAgyModel(agyExe, model, _spawnSync = spawnSync) {
   const modelArgs = buildAgyModelSelectionArgs(model);
   logEvent("agy.model.select.start", { agyExe, args: modelArgs });
-  const result = _spawnSync(agyExe, modelArgs, { stdio: "inherit" });
+  // Send EOF on stdin so AGY exits after processing the /model command
+  // instead of waiting for further interactive input (which would hang headless).
+  const result = _spawnSync(agyExe, modelArgs, {
+    encoding: "utf8",
+    input: "",
+    stdio: ["pipe", "inherit", "inherit"],
+    timeout: 10_000,
+  });
   if (result.error) {
     logEvent("agy.model.select.error", {
       code: result.error.code,
