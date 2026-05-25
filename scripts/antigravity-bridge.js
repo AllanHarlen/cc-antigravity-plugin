@@ -87,7 +87,8 @@ const USAGE = `Usage:
 
 Options:
   --task <text>              Explicit task text.
-  --model <name>             Select the AGY model for this call via agy -i "/model ...".
+  --model <name>             Preferred model (shown in --print-command as manual setup steps).
+                             AGY v1.0.2 has no headless --model flag; set it via \`agy\` interactively.
   --dirs <path,...>          Directories to ingest recursively.
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
   --files <glob,...>         File globs to ingest.
@@ -727,14 +728,7 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
 function selectAgyModel(agyExe, model, _spawnSync = spawnSync) {
   const modelArgs = buildAgyModelSelectionArgs(model);
   logEvent("agy.model.select.start", { agyExe, args: modelArgs });
-  // Send EOF on stdin so AGY exits after processing the /model command
-  // instead of waiting for further interactive input (which would hang headless).
-  const result = _spawnSync(agyExe, modelArgs, {
-    encoding: "utf8",
-    input: "",
-    stdio: ["pipe", "inherit", "inherit"],
-    timeout: 10_000,
-  });
+  const result = _spawnSync(agyExe, modelArgs, { stdio: "inherit" });
   if (result.error) {
     logEvent("agy.model.select.error", {
       code: result.error.code,
@@ -755,6 +749,83 @@ function selectAgyModel(agyExe, model, _spawnSync = spawnSync) {
         "Run `agy` interactively and check that `/model` accepts this model.",
     );
   }
+}
+
+// Selects the AGY model by spawning an interactive session via PTY, sending
+// the /model command, then closing with Ctrl+C. Required because AGY v1.0.2
+// has no headless --model flag and -i hangs without a real TTY.
+export async function selectAgyModelViaPty(agyExe, model, pty, timeoutMs = 15_000) {
+  logEvent("agy.model.select.start", { agyExe, model, method: "pty" });
+  return new Promise((resolve, reject) => {
+    let term;
+    let settled = false;
+    let commandSent = false;
+    let exitSent = false;
+    let output = "";
+
+    const settle = (ok, reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { term?.kill(); } catch {}
+      if (ok) {
+        logEvent("agy.model.select.exit", { model, ok: true });
+        resolve();
+      } else {
+        logEvent("agy.model.select.error", { model, reason });
+        reject(new Error(reason ?? `Model selection via PTY failed for "${model}"`));
+      }
+    };
+
+    const sendCommand = () => {
+      if (commandSent) return;
+      commandSent = true;
+      logEvent("agy.model.select.command", { model });
+      try { term.write(`/model ${model}\n`); } catch {}
+      // After a short delay send /exit to close the interactive session.
+      setTimeout(() => {
+        if (exitSent) return;
+        exitSent = true;
+        try { term.write("/exit\n"); } catch {}
+      }, 1_500);
+    };
+
+    // Fallback: send command after 3s regardless of output.
+    const fallbackTimer = setTimeout(sendCommand, 3_000);
+
+    const timer = setTimeout(() => {
+      clearTimeout(fallbackTimer);
+      settle(false, `Model selection timed out after ${timeoutMs}ms for "${model}"`);
+    }, timeoutMs);
+
+    try {
+      term = pty.spawn(agyExe, [], {
+        name: "xterm-color",
+        cols: 120,
+        rows: 30,
+      });
+
+      term.onData((chunk) => {
+        output += stripAnsi(chunk);
+        if (shouldLogAgyOutput()) logEvent("agy.model.select.output", { chunk });
+        // Send command as soon as AGY produces any output (it's ready).
+        if (!commandSent) {
+          clearTimeout(fallbackTimer);
+          setTimeout(sendCommand, 300);
+        }
+      });
+
+      term.onExit(({ exitCode }) => {
+        settle(exitCode === 0 || exitCode == null,
+          exitCode !== 0 && exitCode != null
+            ? `AGY exited with code ${exitCode} during model selection`
+            : null);
+      });
+    } catch (err) {
+      clearTimeout(fallbackTimer);
+      settle(false, err.message);
+    }
+  });
 }
 
 // PTY merges stdout and stderr into a single stream by design; agy error output
@@ -822,7 +893,9 @@ function renderAgyCommand(args) {
 }
 
 function printResolvedCommands(modelArgs, agyArgs, _stdout = process.stdout) {
+  _stdout.write(`# Run this manually in an interactive terminal to set the model:\n`);
   _stdout.write(renderAgyCommand(modelArgs) + "\n");
+  _stdout.write(`# Then run:\n`);
   _stdout.write(renderAgyCommand(agyArgs) + "\n");
 }
 
@@ -877,9 +950,14 @@ export async function main(argv = process.argv.slice(2), {
 
     const agyExe = resolveAgyExe(_spawnSync);
     checkAgyConnectivity(agyExe, _spawnSync);
-    selectAgyModel(agyExe, model, _spawnSync);
 
     const ptyModule = _loadNodePty();
+
+    if (ptyModule) {
+      await selectAgyModelViaPty(agyExe, model, ptyModule);
+    } else {
+      logEvent("agy.model.select.skipped", { model, reason: "node-pty unavailable" });
+    }
 
     if (parsed.interactive) {
       if (!ptyModule) {

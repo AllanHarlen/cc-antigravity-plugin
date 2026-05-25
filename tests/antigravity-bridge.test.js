@@ -14,6 +14,7 @@ import {
   parseCliArgs,
   resolveAgyModel,
   resolveAgyExe,
+  selectAgyModelViaPty,
   spawnViaConPty,
   stripAnsi,
 } from "../scripts/antigravity-bridge.js";
@@ -526,4 +527,57 @@ test("checkAgyConnectivity: non-zero exit code throws authentication hint", () =
 test("checkAgyConnectivity: exit 0 returns without throwing", () => {
   const fakeSpawn = () => ({ error: null, status: 0, stdout: "agy 1.2.3", stderr: "" });
   assert.doesNotThrow(() => checkAgyConnectivity("agy", fakeSpawn));
+});
+
+// ─── selectAgyModelViaPty ─────────────────────────────────────────────────────
+
+function fakePtyForModelSelect(opts = {}) {
+  const { exitCode = 0, dataChunks = ["AGY ready> "], delayMs = 10 } = opts;
+  return {
+    spawn: (_exe, _args, _opts) => {
+      const dataHandlers = [];
+      const exitHandlers = [];
+      let inputReceived = "";
+      const term = {
+        onData: (fn) => { dataHandlers.push(fn); },
+        onExit: (fn) => { exitHandlers.push(fn); },
+        write: (data) => { inputReceived += data; },
+        kill: () => {},
+        get _input() { return inputReceived; },
+      };
+      setTimeout(() => {
+        for (const chunk of dataChunks) dataHandlers.forEach((fn) => fn(chunk));
+        setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode })), delayMs);
+      }, delayMs);
+      return term;
+    },
+  };
+}
+
+test("selectAgyModelViaPty: resolves when AGY exits 0", async () => {
+  const pty = fakePtyForModelSelect({ exitCode: 0 });
+  await assert.doesNotReject(() => selectAgyModelViaPty("agy", "gemini-3.5-flash-medium", pty, 5_000));
+});
+
+test("selectAgyModelViaPty: rejects on non-zero exit code", async () => {
+  const pty = fakePtyForModelSelect({ exitCode: 2, dataChunks: ["error\n"] });
+  await assert.rejects(
+    () => selectAgyModelViaPty("agy", "gemini-3.5-flash-medium", pty, 5_000),
+    /exited with code 2/,
+  );
+});
+
+test("selectAgyModelViaPty: rejects on timeout", async () => {
+  const pty = {
+    spawn: () => ({
+      onData: () => {},
+      onExit: () => {},
+      write: () => {},
+      kill: () => {},
+    }),
+  };
+  await assert.rejects(
+    () => selectAgyModelViaPty("agy", "gemini-3.5-flash-medium", pty, 50),
+    /timed out/i,
+  );
 });

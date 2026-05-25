@@ -20,16 +20,26 @@ function makeStreams() {
 function fakePtyModule(opts = {}) {
   const exitCode = "exitCode" in opts ? opts.exitCode : 0;
   const { data = "", delayMs = 0, neverExit = false } = opts;
+  let spawnCount = 0;
   return {
     spawn: (_exe, _args, _opts) => {
+      spawnCount += 1;
+      const isModelSelect = spawnCount === 1; // first spawn = model selection
       const dataHandlers = [];
       const exitHandlers = [];
       const term = {
         onData: (fn) => { dataHandlers.push(fn); },
         onExit: (fn) => { exitHandlers.push(fn); },
+        write: () => {},
         kill: () => {},
       };
-      if (!neverExit) {
+      if (isModelSelect) {
+        // Model selection PTY: emit data immediately so sendCommand fires, then exit 0
+        setTimeout(() => {
+          dataHandlers.forEach((fn) => fn("AGY> "));
+          setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode: 0 })), 50);
+        }, 10);
+      } else if (!neverExit) {
         setTimeout(() => {
           if (data) dataHandlers.forEach((fn) => fn(data));
           exitHandlers.forEach((fn) => fn({ exitCode }));
@@ -77,15 +87,16 @@ test("main with no task writes error to stderr and returns 1", async () => {
 
 // ─── --print-command ──────────────────────────────────────────────────────────
 
-test("main --print-command prints agy command and returns 0", async () => {
+test("main --print-command prints model setup hint and agy command", async () => {
   const io = makeStreams();
   const result = await main(["--print-command", "analyze this"], io);
   assert.equal(result, 0);
+  assert.match(io.stdout, /manually/i);
   assert.match(io.stdout, /agy "-i" "\/model gemini-3\.5-flash-medium"/);
   assert.match(io.stdout, /--print/);
 });
 
-test("main --print-command includes explicit Claude model selection when requested", async () => {
+test("main --print-command shows explicit model hint when requested", async () => {
   const io = makeStreams();
   const result = await main([
     "--model",
@@ -135,9 +146,8 @@ test("main spawnSync fallback: propagates exit code 0 from agy", async () => {
     _loadNodePty: () => null,
   });
   assert.equal(result, 0);
-  // calls[0]=where, calls[1]=--version (connectivity), calls[2]=model select, calls[3]=--print
-  assert.deepEqual(calls[2]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
-  assert.equal(calls[3]?.args[0], "--print");
+  // calls[0]=where, calls[1]=--version (connectivity), calls[2]=--print (actual task)
+  assert.equal(calls[2]?.args[0], "--print");
 });
 
 test("main spawnSync fallback: propagates non-zero exit code from agy", async () => {
@@ -150,8 +160,8 @@ test("main spawnSync fallback: propagates non-zero exit code from agy", async ()
         return { status: 0, stdout: "agy\n" };
       }
       agyCallCount += 1;
-      // calls: 1=--version (connectivity), 2=model select, 3=actual task
-      return { error: null, status: agyCallCount <= 2 ? 0 : 2 };
+      // calls: 1=--version (connectivity), 2=actual task
+      return { error: null, status: agyCallCount <= 1 ? 0 : 2 };
     },
     _loadNodePty: () => null,
   });
@@ -170,8 +180,8 @@ test("main ConPTY: exitCode 0 resolves to 0 and writes output to stdout", async 
     _conPtyTimeoutMs: 5_000,
   });
   assert.equal(result, 0);
-  // calls[0]=where, calls[1]=--version (connectivity), calls[2]=model select
-  assert.deepEqual(calls[2]?.args, ["-i", "/model gemini-3.5-flash-medium"]);
+  // calls[0]=where, calls[1]=--version (connectivity); PTY handles the actual task
+  assert.equal(calls[0]?.cmd === "where" || calls[0]?.cmd === "which", true);
   assert.match(io.stdout, /analysis result/);
 });
 
