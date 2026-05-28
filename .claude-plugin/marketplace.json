@@ -1,6 +1,6 @@
 {
     "name": "cc-antigravity-plugin",
-    "description": "Antigravity CLI (AGY) integration for Claude Code with model selection, conversation continuity, and shared runtime support",
+    "description": "Integração do Antigravity CLI (AGY) para Claude Code com exploração de código em contexto longo, revisão de arquitetura e análise de base de código",
     "owner": {
         "name": "Allan Harlen",
         "email": "allanharlen@gmail.com"
@@ -9,8 +9,8 @@
         {
             "name": "cc-antigravity-plugin",
             "displayName": "Antigravity CLI Integration",
-            "description": "Invoke Antigravity CLI (AGY) for long-context code exploration, architecture review, and codebase analysis with model selection and conversation continuity",
-            "version": "3.2.0",
+            "description": "Invoca o Antigravity CLI (AGY) para exploração de código em contexto longo, revisão de arquitetura e análise de base de código com seleção de modelo e continuidade de conversa",
+            "version": "3.2.5",
             "author": {
                 "name": "Allan Harlen",
                 "email": "allanharlen@gmail.com"
@@ -23,18 +23,29 @@
                 "google",
                 "gemini",
                 "long-context",
-                "code-exploration"
+                "code-exploration",
+                "architecture",
+                "analysis",
+                "documentation"
             ],
             "keywords": [
                 "antigravity",
                 "agy",
                 "google",
                 "code-exploration",
-                "analysis"
+                "analysis",
+                "long-context",
+                "architecture",
+                "refactoring"
             ],
             "homepage": "https://github.com/AllanHarlen/cc-antigravity-plugin",
             "repository": "https://github.com/AllanHarlen/cc-antigravity-plugin",
-            "license": "MIT"
+            "license": "MIT",
+            "requiresExternalTool": {
+                "name": "agy",
+                "installUrl": "https://antigravity.google/cli/install.sh",
+                "description": "Antigravity CLI (AGY)"
+            }
         }
     ]
 }

@@ -1,17 +1,17 @@
 # cc-antigravity-plugin
 
-Leve para o Claude Code e para o Codex uma passagem de contexto longo pelo
-Antigravity CLI (AGY), ideal para revisao de arquitetura, analise de impacto de
-refatoracao, sintese de documentacao e analise de dados textuais mistos.
+Leva para o Claude Code e para o Codex uma passagem de contexto longo pelo
+Antigravity CLI (AGY), ideal para revisão de arquitetura, análise de impacto de
+refatoração, síntese de documentação e análise de dados textuais mistos.
 
-O Claude Code e excelente para edicoes locais e precisas. O AGY ajuda quando
-uma fatia ampla do repositorio precisa ser lida e sintetizada em uma unica
+O Claude Code é excelente para edições locais e precisas. O AGY ajuda quando
+uma fatia ampla do repositório precisa ser lida e sintetizada em uma única
 passagem. Este plugin conecta os dois por meio de um bridge Node.js
 compartilhado.
 
-## Pre-requisitos
+## Pré-requisitos
 
-Instale e autentique o AGY:
+Instale e autentique o AGY antes de usar o plugin:
 
 ```bash
 # macOS / Linux
@@ -19,18 +19,41 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 # Windows PowerShell
 irm https://antigravity.google/cli/install.ps1 | iex
+```
 
-agy
+Após instalar, rode `agy` uma vez para fazer login e confirme que está funcionando:
+
+```bash
 agy --print "what is 2+2"
 ```
 
-## Instalacao
+## Instalação
 
-### Claude Code
+### Via Marketplace do Claude Code (recomendado)
 
 ```bash
-/plugin marketplace add AllanHarlen/cc-antigravity-plugin
-/plugin install cc-antigravity-plugin@cc-antigravity-plugin
+claude plugin install AllanHarlen/cc-antigravity-plugin
+```
+
+Ou dentro do Claude Code:
+
+```
+/plugin install AllanHarlen/cc-antigravity-plugin
+```
+
+Após instalar, reinicie o Claude Code para carregar o plugin.
+
+### Instalação Local (desenvolvimento)
+
+Para testar uma cópia local do repositório:
+
+```
+/plugin install ./
+```
+
+Recarregue os plugins depois:
+
+```
 /reload-plugins
 ```
 
@@ -42,7 +65,7 @@ git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
   ~/.agents/skills/cc-antigravity-plugin
 ```
 
-Reinicie o Codex depois de clonar.
+Reinicie o Codex após clonar.
 
 ## Uso
 
@@ -53,66 +76,70 @@ Reinicie o Codex depois de clonar.
 /cc-antigravity-plugin:antigravity --add-dir src <tarefa>
 ```
 
-No Codex, use a skill raiz com:
+No Codex, use o agente via:
 
 ```text
-$antigravity-integration
+@antigravity-agent <tarefa>
 ```
 
-## Opcoes
+## Opções
 
-| Opcao | Descricao |
+| Opção | Descrição |
 |-------|-----------|
-| `--dirs <path,...>` | Injeta diretorios recursivamente no prompt do bridge |
-| `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por virgula |
+| `--dirs <path,...>` | Injeta diretórios recursivamente no prompt do bridge |
+| `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por vírgula |
 | `--add-dir <path>` | Repassa o `--add-dir` nativo do AGY; pode ser repetido |
-| `--model <name>` | Seleciona o modelo do AGY via `agy -i "/model ..."` antes da execucao |
+| `--model <name>` | Seleciona o modelo do AGY via `agy -i "/model ..."` antes da execução |
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
-| `--conversation <id>` | Retoma uma conversa especifica do AGY |
+| `--conversation <id>` | Retoma uma conversa específica do AGY |
 | `--timeout <duration>` | Repassa `--print-timeout` ao AGY, por exemplo `3m` |
-| `--agent`, `--interactive` | Usa `--prompt-interactive` para abrir uma sessao AGY agente |
+| `--agent`, `--interactive` | Usa `--prompt-interactive` para abrir uma sessão AGY agente |
 | `--sandbox` | Ativa o modo sandbox do AGY |
 | `--skip-permissions` | Repassa `--dangerously-skip-permissions` ao AGY |
-| `--max-files <n>` | Numero maximo de arquivos injetados, padrao `40` |
-| `--max-file-bytes <n>` | Numero maximo de bytes por arquivo injetado, padrao `32768` |
+| `--max-files <n>` | Número máximo de arquivos injetados, padrão `40` |
+| `--max-file-bytes <n>` | Número máximo de bytes por arquivo injetado, padrão `32768` |
 | `--print-command` | Imprime o comando `agy` resolvido sem executar |
 
-`--format json` nao e suportado porque o modo headless `--print` do AGY retorna
-texto.
+`--format json` não é suportado porque o modo headless `--print` do AGY retorna texto.
 
-Modelos recomendados:
+### Modelos recomendados
 
 | Modelo | Uso |
 |--------|-----|
-| `gemini-3.5-flash-medium` | Padrao quando `--model` nao e informado; maioria das atividades |
-| `gemini-3.5-flash-high` | Flash com mais esforco para tarefas um pouco mais exigentes |
-| `gemini-3.1-pro-low` | Atividades de maior raciocinio |
+| `gemini-3.5-flash-medium` | Padrão quando `--model` não é informado; maioria das atividades |
+| `gemini-3.5-flash-high` | Flash com mais esforço para tarefas um pouco mais exigentes |
+| `gemini-3.1-pro-low` | Atividades de maior raciocínio |
 | `claude-4.6-sonnet-thinking` | Somente quando passado explicitamente com `--model` |
 | `claude-4.6-opus-thinking` | Somente quando passado explicitamente com `--model` |
 
 ## Exemplos
 
 ```bash
+# Revisão de arquitetura
 /cc-antigravity-plugin:antigravity --dirs src,docs \
   "Explique a arquitetura. Cite arquivos-chave e fluxos de dados."
 ```
 
 ```bash
+# Análise de impacto de refatoração
 /cc-antigravity-plugin:antigravity --add-dir src --model gemini-3.1-pro-low \
-  "Analise o impacto de refatorar o modulo de auth."
+  "Analise o impacto de refatorar o módulo de auth."
 ```
 
 ```bash
+# Continuação de conversa
 /cc-antigravity-plugin:antigravity --continue --timeout 5m \
-  "Resuma o plano de migracao da resposta anterior."
+  "Resuma o plano de migração da resposta anterior."
 ```
 
 ```bash
+# Sessão de agente no workspace
 /cc-antigravity-plugin:antigravity --agent --add-dir . --skip-permissions \
-  "Atue como agente no workspace e crie relatorio-impostos.html com um relatorio HTML sobre impostos no Brasil."
+  "Atue como agente no workspace e crie relatorio-impostos.html com um relatório HTML sobre impostos no Brasil."
 ```
 
 ```bash
+# Inspecionar o comando sem executar
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src --print-command -- "analisar auth"
 ```
 
@@ -122,39 +149,41 @@ O bridge compartilhado em `scripts/antigravity-bridge.js`:
 
 1. Faz o parse das flags do bridge.
 2. Resolve `--dirs` e `--files` sem depender de APIs de glob exclusivas do Node 22.
-3. Filtra caminhos ignorados e arquivos binarios.
-4. Monta um prompt estruturado com inventario, payloads inline, tarefa e restricoes.
+3. Filtra caminhos ignorados e arquivos binários.
+4. Monta um prompt estruturado com inventário, payloads inline, tarefa e restrições.
 5. Mapeia flags nativas do AGY como `--add-dir`, `--continue`, `--conversation`,
    `--prompt-interactive`, `--sandbox`, `--dangerously-skip-permissions` e
    `--print-timeout`.
 6. Seleciona o modelo com `agy -i "/model <modelo>"`; se nada for informado, usa `gemini-3.5-flash-medium`.
-7. Executa o AGY via `node-pty` quando disponivel e faz streaming do output conforme
+7. Executa o AGY via `node-pty` quando disponível e faz streaming do output conforme
    ele chega, com fallback para `spawnSync`.
 
-## Estrutura do Repositorio
+O hook `SessionStart` verifica automaticamente se o AGY está instalado e respondendo a cada início de sessão.
+
+## Estrutura do Repositório
 
 ```text
 cc-antigravity-plugin/
-|-- .claude-plugin/
-|   |-- marketplace.json
-|   `-- plugin.json
-|-- agents/
-|   `-- antigravity-agent.md
-|-- bin/
-|   `-- antigravity-bridge
-|-- commands/
-|   `-- antigravity.md
-|-- hooks/
-|   `-- hooks.json
-|-- scripts/
-|   |-- antigravity-bridge.js
-|   `-- check-agy.js
-|-- tests/
-|   |-- antigravity-bridge.test.js
-|   `-- antigravity-main.test.js
-|-- SKILL.md
-|-- LICENSE
-`-- package.json
+├── .claude-plugin/
+│   ├── marketplace.json
+│   └── plugin.json
+├── agents/
+│   └── antigravity-agent.md
+├── bin/
+│   └── antigravity-bridge
+├── commands/
+│   └── antigravity.md
+├── hooks/
+│   └── hooks.json
+├── scripts/
+│   ├── antigravity-bridge.js
+│   └── check-agy.js
+├── tests/
+│   ├── antigravity-bridge.test.js
+│   └── antigravity-main.test.js
+├── SKILL.md
+├── LICENSE
+└── package.json
 ```
 
 ## Desenvolvimento
@@ -165,40 +194,48 @@ npm test
 
 ### Teste controlado com logs
 
-Para abrir o Claude Code com o plugin instrumentado e acompanhar o log do bridge
-em tempo real:
+Para testar localmente o plugin dentro do Claude Code com logs em tempo real:
+
+```bash
+# Instalar a versão local do plugin
+/plugin install ./
+/reload-plugins
+
+# Rodar um ciclo de teste
+/cc-antigravity-plugin:antigravity --files package.json --timeout 2m responda apenas plugin-log-ok
+```
+
+Para acompanhar o log do bridge em tempo real (PowerShell):
 
 ```powershell
 .\scripts\run-claude-plugin-dev.ps1
 ```
 
 O script cria um arquivo em `.antigravitycli/logs/*.jsonl`, define
-`CC_ANTIGRAVITY_LOG_PATH` para a sessao e abre uma segunda janela fazendo
+`CC_ANTIGRAVITY_LOG_PATH` para a sessão e abre uma segunda janela fazendo
 `Get-Content -Wait` nesse log.
 
-Dentro do Claude Code, rode um ciclo pequeno:
-
-```text
-/plugin marketplace add ./
-/plugin install cc-antigravity-plugin@cc-antigravity-plugin
-/reload-plugins
-/cc-antigravity-plugin:antigravity --files package.json --timeout 2m responda apenas plugin-log-ok
-```
-
 O log registra eventos como parse de argumentos, arquivos coletados, flags
-repassadas ao AGY, selecao de modelo, inicio/fim da execucao e
-erros. O prompt completo nao e gravado; o log mostra apenas o tamanho dele.
+repassadas ao AGY, seleção de modelo, início/fim da execução e erros.
 
-## Solucao de Problemas
+### Variáveis de Ambiente
 
-| Problema | Solucao |
+| Variável | Descrição |
+|----------|-----------|
+| `CC_ANTIGRAVITY_LOG_PATH` | Caminho customizado para o arquivo de log JSONL |
+| `CC_ANTIGRAVITY_LOG_OUTPUT` | Defina como `1` para incluir o output do AGY nos logs |
+
+## Solução de Problemas
+
+| Problema | Solução |
 |----------|---------|
-| Erro de autenticacao | Rode `agy` interativamente e faca login. |
-| `agy` nao encontrado | Rode o instalador do AGY novamente e confirme que o binario esta no PATH. |
-| Selecao de modelo falhou | Rode `agy` interativamente e confirme que `/model <nome>` aceita o modelo solicitado. |
-| Pressao de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
+| Erro de autenticação | Rode `agy` interativamente e faça login. |
+| `agy` não encontrado | Rode o instalador do AGY novamente e confirme que o binário está no PATH. |
+| Seleção de modelo falhou | Rode `agy` interativamente e confirme que `/model <nome>` aceita o modelo solicitado. |
+| Pressão de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
 | Timeout | Aumente `--timeout`, reduza o contexto ou deixe a tarefa mais direta. |
+| Plugin não encontrado após instalar | Rode `/reload-plugins` ou reinicie o Claude Code. |
 
-## Licenca
+## Licença
 
 MIT
