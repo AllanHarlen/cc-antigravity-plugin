@@ -782,6 +782,10 @@ export async function main(argv = process.argv.slice(2), {
     logEvent("bridge.context.collected", summarizeContext(context));
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
+    // When running --agent in a non-TTY environment, AGY's workspace trust prompt
+    // ("Do you trust this folder?") blocks indefinitely. Auto-add skip-permissions
+    // so the headless session can proceed without hanging.
+    const skipPermissions = parsed.skipPermissions || (parsed.interactive && !_isTTY);
     const agyArgs = buildAntigravityArgs({
       prompt,
       timeout,
@@ -790,7 +794,7 @@ export async function main(argv = process.argv.slice(2), {
       conversationId: parsed.conversationId,
       addDirs: parsed.addDirs,
       sandbox: parsed.sandbox,
-      skipPermissions: parsed.skipPermissions,
+      skipPermissions,
     });
     logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout });
 
@@ -816,9 +820,9 @@ export async function main(argv = process.argv.slice(2), {
       } else if (!_isTTY) {
         logEvent("bridge.interactive.no-tty");
         _stderr.write(
-          "Warning: --agent/--interactive is running without a terminal (no TTY detected). " +
-            "AGY may hang waiting for user input. " +
-            "Use the default headless mode unless you have an interactive terminal attached.\n",
+          "Warning: --agent/--interactive without TTY: --dangerously-skip-permissions added " +
+            "automatically to prevent workspace trust prompts from blocking the session. " +
+            "Ensure agy is authenticated (run `agy` once interactively to complete sign-in).\n",
         );
       }
     }

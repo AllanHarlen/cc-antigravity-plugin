@@ -570,3 +570,65 @@ test("main: spawnSync fallback strips ANSI codes from captured output", async ()
   assert.ok(!out.includes("\x1b["), "ANSI escape codes should be stripped");
 });
 
+test("main: --agent without TTY auto-adds --dangerously-skip-permissions", async () => {
+  const capturedArgs = [];
+
+  const fakePty = {
+    spawn: (exe, args, _opts) => {
+      capturedArgs.push(...args);
+      const dataHandlers = [];
+      const exitHandlers = [];
+      setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode: 0 })), 0);
+      return {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: (fn) => exitHandlers.push(fn),
+        kill: () => {},
+      };
+    },
+  };
+
+  await main(["--agent", "--add-dir", ".", "build a file"], {
+    _spawnSync: () => ({ status: 0, stdout: "agy 1.0.0", stderr: "" }),
+    _loadNodePty: () => fakePty,
+    _stdout: { write: () => {} },
+    _stderr: { write: () => {} },
+    _isTTY: false,
+  });
+
+  assert.ok(
+    capturedArgs.includes("--dangerously-skip-permissions"),
+    "--dangerously-skip-permissions should be injected when --agent + no TTY",
+  );
+});
+
+test("main: --agent with TTY does NOT auto-add --dangerously-skip-permissions", async () => {
+  const capturedArgs = [];
+
+  const fakePty = {
+    spawn: (exe, args, _opts) => {
+      capturedArgs.push(...args);
+      const dataHandlers = [];
+      const exitHandlers = [];
+      setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode: 0 })), 0);
+      return {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: (fn) => exitHandlers.push(fn),
+        kill: () => {},
+      };
+    },
+  };
+
+  await main(["--agent", "--add-dir", ".", "build a file"], {
+    _spawnSync: () => ({ status: 0, stdout: "agy 1.0.0", stderr: "" }),
+    _loadNodePty: () => fakePty,
+    _stdout: { write: () => {} },
+    _stderr: { write: () => {} },
+    _isTTY: true,
+  });
+
+  assert.ok(
+    !capturedArgs.includes("--dangerously-skip-permissions"),
+    "--dangerously-skip-permissions should NOT be injected when --agent has a real TTY",
+  );
+});
+
