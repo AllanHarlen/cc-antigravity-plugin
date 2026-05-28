@@ -2,7 +2,7 @@
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
     "version": "3.2.5",
-    "description": "Integrate Antigravity CLI (AGY) for long-context code exploration with model selection and conversation continuity",
+    "description": "Integra o Antigravity CLI (AGY) ao Claude Code para exploração de código em contexto longo, revisão de arquitetura e análise de base de código com seleção de modelo e continuidade de conversa",
     "author": {
         "name": "Allan Harlen",
         "email": "allanharlen@gmail.com"
@@ -22,24 +22,29 @@
         "codex",
         "claude-code"
     ],
-    "skills": "./",
     "commands": [
         "./commands/antigravity.md"
     ],
     "agents": [
         "./agents/antigravity-agent.md"
     ],
+    "hooks": "./hooks/hooks.json",
+    "requiresExternalTool": {
+        "name": "agy",
+        "installUrl": "https://antigravity.google/cli/install.sh",
+        "description": "Antigravity CLI (AGY) — ferramenta de exploração de código em contexto longo do Google"
+    },
     "userConfig": {
         "default_model": {
             "type": "string",
-            "title": "Default AGY Model",
-            "description": "Model to use when --model is not specified. Default Gemini Flash medium is best for most tasks; use gemini-3.1-pro-low for harder reasoning, or pass Claude models explicitly with --model.",
+            "title": "Modelo AGY Padrão",
+            "description": "Modelo usado quando --model não é especificado. Gemini Flash medium é o padrão para a maioria das tarefas; use gemini-3.1-pro-low para raciocínio mais exigente, ou passe modelos Claude explicitamente com --model.",
             "default": "gemini-3.5-flash-medium"
         },
         "timeout": {
             "type": "string",
-            "title": "Default Timeout",
-            "description": "Default timeout for AGY print mode, for example 3m, 300s, or 5m0s.",
+            "title": "Timeout Padrão",
+            "description": "Timeout padrão para o modo print do AGY, por exemplo 3m, 300s ou 5m0s.",
             "default": "5m0s"
         }
     }
