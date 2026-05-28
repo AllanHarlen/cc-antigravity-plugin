@@ -1,15 +1,16 @@
 ---
 description: Invoke the shared Antigravity (AGY) bridge for long-context code exploration, analysis, and documentation generation
 allowed-tools: Bash, Glob, Read
-argument-hint: "[--model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--agent] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--headless] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
 
 Use the shared Antigravity bridge for long-context code exploration,
 architecture review, documentation synthesis, and structured data analysis.
-The bridge collects optional local context, maps supported runtime flags to AGY,
-selects the requested AGY model, and then runs one deterministic AGY task call.
+The bridge defaults to AGY agent mode (`--prompt-interactive`), which lets AGY
+read and write files in the workspace. Pass `--headless` to switch to read-only
+text output (`--print`).
 
 ## Usage
 
@@ -24,14 +25,15 @@ selects the requested AGY model, and then runs one deterministic AGY task call.
 
 | Argument | Description | Example |
 |----------|-------------|---------|
-| `--model <name>` | Select the AGY model for this call via `agy -i "/model ..."` | `--model gemini-3.1-pro-low` |
+| `--model <name>` | Select the AGY model for this call | `--model gemini-3.1-pro-low` |
 | `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs,data` |
 | `--add-dir <path>` | Add a directory to AGY's native workspace support. Repeatable | `--add-dir src` |
 | `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json,data/**/*.csv"` |
+| `--headless` | Use `--print` (text-only, no file creation) instead of the default agent mode | `--headless` |
+| `--agent`, `--interactive` | Explicit agent mode (same as default; kept for compatibility) | `--agent` |
 | `--continue`, `-c` | Continue the most recent AGY conversation | `--continue` |
 | `--conversation <id>` | Resume a specific AGY conversation | `--conversation abc123` |
 | `--timeout <duration>` | Forward `--print-timeout` to AGY | `--timeout 3m` |
-| `--agent`, `--interactive` | Use AGY `--prompt-interactive` for an agent-style workspace session | `--agent --add-dir .` |
 | `--sandbox` | Enable AGY sandbox mode | `--sandbox` |
 | `--skip-permissions` | Forward `--dangerously-skip-permissions` to AGY | `--skip-permissions` |
 | `<task>` | Analysis task or question | required |
@@ -45,15 +47,36 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] -- "<TASK>"
 ```
 
 Guidance:
+- Agent mode (`--prompt-interactive`) is the default — no flag needed.
+- Use `--headless` only when you need text-only output without file editing.
 - Use `--dirs` for broad module or service areas that should be inlined.
 - Use `--files` for precise globs or structured data slices.
 - Use `--add-dir` when AGY should access the directory through its own workspace mechanism.
 - When `--model` is omitted, the bridge selects `gemini-3.5-flash-medium`.
 - Use `gemini-3.5-flash-medium` for most tasks and `gemini-3.1-pro-low` for higher-reasoning tasks.
 - Use Claude models only when the user explicitly passes `--model claude-4.6-sonnet-thinking` or `--model claude-4.6-opus-thinking`.
-- Use `--agent --add-dir .` when AGY should act as a workspace agent instead of only returning text.
 - Keep the task direct, scoped, and explicit about the output shape.
 - `--format json` is not supported; AGY headless mode returns text.
+
+## Interactive Prompt Handling
+
+When AGY requires user confirmation (e.g. "Do you trust the contents of this
+project?") the bridge cannot answer interactively and instead emits a single
+line to stdout:
+
+```
+BRIDGE_ASK_USER:<json>
+```
+
+**If this line appears in the bridge output, you MUST:**
+
+1. Parse the JSON after the prefix.
+2. Call `AskUserQuestion` with `question` and `options` from the JSON.
+3. If the user selects the first option ("Yes …"):
+   - Re-invoke the same bridge command, inserting `yes_flag` from the JSON
+     immediately after the bridge script path (before other flags).
+4. If the user selects the second option ("No / abort"):
+   - Inform the user the operation was cancelled. Do not re-invoke.
 
 ## Examples
 
@@ -67,9 +90,14 @@ Guidance:
 /cc-antigravity-plugin:antigravity --dirs src,docs explain the architecture of this codebase
 ```
 
-### Native AGY workspace
+### Native AGY workspace (agent creates/edits files)
 ```bash
-/cc-antigravity-plugin:antigravity --add-dir src analyze the refactor impact of the auth module
+/cc-antigravity-plugin:antigravity --add-dir . create relatorio-impostos.html with an HTML tax report
+```
+
+### Read-only text output
+```bash
+/cc-antigravity-plugin:antigravity --headless --dirs src summarize the API surface
 ```
 
 ### Resume work with a deeper Gemini model
@@ -80,11 +108,6 @@ Guidance:
 ### Explicit Claude model
 ```bash
 /cc-antigravity-plugin:antigravity --model claude-4.6-sonnet-thinking review the migration plan
-```
-
-### Agent workspace session
-```bash
-/cc-antigravity-plugin:antigravity --agent --add-dir . create relatorio-impostos.html with an HTML tax report
 ```
 
 ## Error Handling

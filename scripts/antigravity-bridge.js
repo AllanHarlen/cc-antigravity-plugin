@@ -84,9 +84,8 @@ Options:
   --files <glob,...>         File globs to ingest.
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
-  --interactive              Use agy --prompt-interactive instead of --print.
-                             Requires PTY support and an interactive terminal (TTY).
-  --agent                    Alias for --interactive; intended for AGY workspace-editing sessions.
+  --headless                 Use agy --print instead of the default --prompt-interactive.
+  --interactive, --agent     Explicit agent mode (same as default; kept for compatibility).
   --continue, -c             Continue the most recent AGY conversation.
   --conversation <id>        Resume a specific AGY conversation.
   --sandbox                  Enable AGY sandbox mode.
@@ -95,6 +94,11 @@ Options:
   --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
   --print-command            Print the resolved agy command and exit.
   -h, --help                 Show this help message.
+
+Interactive prompts:
+  When AGY shows a trust/permission prompt (non-TTY), the bridge emits:
+    BRIDGE_ASK_USER:<json>
+  Claude should parse the JSON, call AskUserQuestion, and re-invoke with yes_flag on Yes.
 
 Logging:
   Plugin events are always written to a JSONL log file.
@@ -244,7 +248,7 @@ export function parseCliArgs(argv) {
     files: [],
     format: "text",
     timeout: undefined,
-    interactive: false,
+    interactive: true,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
@@ -290,6 +294,9 @@ export function parseCliArgs(argv) {
       case "--timeout":
         parsed.timeout = takeOptionValue(argv, index, token);
         index += 1;
+        break;
+      case "--headless":
+        parsed.interactive = false;
         break;
       case "--interactive":
       case "--agent":
@@ -685,12 +692,28 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
 
 
 
+// Returned by spawnViaConPty when an interactive prompt was detected and surfaced.
+export const EXIT_NEEDS_INPUT = 2;
+
+// Known AGY interactive prompts that cannot be handled without a real TTY.
+// When detected in PTY output the bridge emits BRIDGE_ASK_USER:<json> and exits.
+export const AGY_INTERACTIVE_PROMPTS = [
+  {
+    pattern: /do you trust the contents of this project/i,
+    question: 'AGY requires workspace trust: "Do you trust the contents of this project?" — Antigravity CLI needs permission to read, edit, and execute files in this directory.',
+    options: ["Yes, I trust this folder", "No, abort"],
+    yes_flag: "--skip-permissions",
+  },
+];
+
 // PTY merges stdout and stderr into a single stream by design; agy error output
 // (auth failures, rate limits) will appear in the same stream as the response body.
-export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_MS, _stdout = process.stdout) {
+export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_MS, _stdout = process.stdout, _promptPatterns = AGY_INTERACTIVE_PROMPTS) {
   return new Promise((resolve, reject) => {
     let wroteOutput = false;
     let lastOutput = "";
+    let outputBuffer = "";
+    let askEmitted = false;
     let term;
     logEvent("agy.conpty.spawn.start", {
       agyExe,
@@ -724,14 +747,37 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
 
     term.onData((data) => {
       const clean = stripAnsi(data);
-      if (clean) {
-        wroteOutput = true;
-        lastOutput = clean;
-        if (shouldLogAgyOutput()) {
-          logEvent("agy.output.chunk", { text: clean });
+      if (!clean || askEmitted) return;
+
+      outputBuffer += clean;
+
+      // Detect known interactive prompts before forwarding output.
+      for (const entry of _promptPatterns) {
+        if (entry.pattern.test(outputBuffer)) {
+          askEmitted = true;
+          clearTimeout(timer);
+          try { term.kill(); } catch { /* already dead */ }
+          logEvent("agy.interactive.prompt.detected", { question: entry.question });
+          _stdout.write(
+            "BRIDGE_ASK_USER:" +
+              JSON.stringify({
+                question: entry.question,
+                options: entry.options,
+                yes_flag: entry.yes_flag,
+              }) +
+              "\n",
+          );
+          resolve(EXIT_NEEDS_INPUT);
+          return;
         }
-        _stdout.write(clean);
       }
+
+      wroteOutput = true;
+      lastOutput = clean;
+      if (shouldLogAgyOutput()) {
+        logEvent("agy.output.chunk", { text: clean });
+      }
+      _stdout.write(clean);
     });
     term.onExit(({ exitCode }) => {
       clearTimeout(timer);
@@ -782,10 +828,6 @@ export async function main(argv = process.argv.slice(2), {
     logEvent("bridge.context.collected", summarizeContext(context));
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
-    // When running --agent in a non-TTY environment, AGY's workspace trust prompt
-    // ("Do you trust this folder?") blocks indefinitely. Auto-add skip-permissions
-    // so the headless session can proceed without hanging.
-    const skipPermissions = parsed.skipPermissions || (parsed.interactive && !_isTTY);
     const agyArgs = buildAntigravityArgs({
       prompt,
       timeout,
@@ -794,7 +836,7 @@ export async function main(argv = process.argv.slice(2), {
       conversationId: parsed.conversationId,
       addDirs: parsed.addDirs,
       sandbox: parsed.sandbox,
-      skipPermissions,
+      skipPermissions: parsed.skipPermissions,
     });
     logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout });
 
@@ -809,33 +851,25 @@ export async function main(argv = process.argv.slice(2), {
 
     const ptyModule = _loadNodePty();
 
-    if (parsed.interactive) {
-      if (!ptyModule) {
-        logEvent("bridge.interactive.no-pty");
-        _stderr.write(
-          "Warning: --agent/--interactive: node-pty unavailable; falling back to spawnSync. " +
-            "AGY workspace-editing will run headlessly — file creation works but " +
-            "interactive prompts will not be supported.\n",
-        );
-      } else if (!_isTTY) {
+    if (ptyModule) {
+      if (parsed.interactive && !_isTTY) {
         logEvent("bridge.interactive.no-tty");
         _stderr.write(
-          "Warning: --agent/--interactive without TTY: --dangerously-skip-permissions added " +
-            "automatically to prevent workspace trust prompts from blocking the session. " +
-            "Ensure agy is authenticated (run `agy` once interactively to complete sign-in).\n",
+          "Warning: agent mode without TTY — AGY trust/permission prompts will be " +
+            "surfaced as BRIDGE_ASK_USER for Claude to handle via AskUserQuestion.\n",
         );
       }
-    }
-
-    if (ptyModule) {
       try {
-        return await spawnViaConPty(
+        const code = await spawnViaConPty(
           agyExe,
           agyArgs,
           ptyModule,
           timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
           _stdout,
         );
+        // EXIT_NEEDS_INPUT means the bridge emitted BRIDGE_ASK_USER; Claude handles re-invocation.
+        if (code === EXIT_NEEDS_INPUT) return 0;
+        return code;
       } catch (err) {
         if (err?.code === "ENOENT" || String(err).includes("not found")) {
           throw buildAgyMissingError();
@@ -845,10 +879,37 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     // Fallback for platforms or installs where node-pty is unavailable.
-    // stdio:"pipe" ensures output is captured and forwarded to _stdout/_stderr rather than
-    // going to the parent process's stdout untracked (which loses it in non-TTY contexts).
-    logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
-    const result = _spawnSync(agyExe, agyArgs, { stdio: "pipe", encoding: "utf8" });
+    // stdio:"pipe" captures output so it reaches the conversation instead of being lost.
+    // In agent mode without PTY, --dangerously-skip-permissions is added automatically
+    // because interactive prompt detection is not possible in the spawnSync path.
+    const syncSkipPermissions = parsed.skipPermissions || (parsed.interactive && !_isTTY);
+    const syncAgyArgs =
+      syncSkipPermissions !== parsed.skipPermissions
+        ? buildAntigravityArgs({
+            prompt,
+            timeout,
+            interactive: parsed.interactive,
+            continueConversation: parsed.continueConversation,
+            conversationId: parsed.conversationId,
+            addDirs: parsed.addDirs,
+            sandbox: parsed.sandbox,
+            skipPermissions: syncSkipPermissions,
+          })
+        : agyArgs;
+
+    if (parsed.interactive) {
+      logEvent("bridge.interactive.no-pty");
+      _stderr.write(
+        "Warning: agent mode without PTY (node-pty unavailable); falling back to spawnSync. " +
+          (syncSkipPermissions !== parsed.skipPermissions
+            ? "--dangerously-skip-permissions added automatically. "
+            : "") +
+          "Ensure agy is authenticated (run `agy` once interactively).\n",
+      );
+    }
+
+    logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(syncAgyArgs) });
+    const result = _spawnSync(agyExe, syncAgyArgs, { stdio: "pipe", encoding: "utf8" });
     if (result.stdout) _stdout.write(stripAnsi(result.stdout));
     if (result.stderr) _stderr.write(stripAnsi(result.stderr));
     if (result.error) {

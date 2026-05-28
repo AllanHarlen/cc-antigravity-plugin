@@ -64,7 +64,7 @@ Do not use Antigravity for:
    - `--files` for precise globs or mixed data sources
    - `--add-dir` when AGY should receive a directory through its native workspace support
 3. Add optional runtime flags only when they help: `--model`, `--continue`,
-   `--conversation`, `--timeout`, `--agent`, `--sandbox`, or `--skip-permissions`.
+   `--conversation`, `--timeout`, `--headless`, `--sandbox`, or `--skip-permissions`.
 4. If no AGY model is requested, omit `--model`; the bridge defaults to `gemini-3.5-flash-medium`.
 5. Use `gemini-3.1-pro-low` for tasks that clearly need deeper reasoning.
 6. Use Claude models only when the user explicitly asks for `claude-4.6-sonnet-thinking` or `claude-4.6-opus-thinking`.
@@ -73,7 +73,7 @@ Do not use Antigravity for:
 
 ## Command Patterns
 
-Basic:
+Basic (agent mode is the default):
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" -- "<TASK>"
@@ -97,11 +97,23 @@ With model and conversation continuity:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --model gemini-3.1-pro-low --continue -- "<TASK>"
 ```
 
-Agent workspace session:
+Read-only text output (headless mode):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --agent --add-dir . -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --headless --dirs src -- "<TASK>"
 ```
+
+## Interactive Prompt Handling
+
+When the bridge stdout contains a line starting with `BRIDGE_ASK_USER:`, AGY
+has produced an interactive confirmation prompt (e.g. workspace trust) that
+requires user input. You MUST handle it as follows:
+
+1. Parse the JSON after the `BRIDGE_ASK_USER:` prefix.
+2. Call `AskUserQuestion` with `question` and `options` from the JSON.
+3. On Yes (first option): re-invoke the bridge, inserting `yes_flag` from the
+   JSON right after the script path.
+4. On No: inform the user and abort.
 
 ## Prompting Guidance
 

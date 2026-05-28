@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  AGY_INTERACTIVE_PROMPTS,
+  EXIT_NEEDS_INPUT,
   buildAntigravityArgs,
   buildAntigravityPrompt,
   checkAgyConnectivity,
@@ -35,7 +37,7 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     files: ["**/*.json", "docs/**/*.md"],
     format: "text",
     timeout: undefined,
-    interactive: false,
+    interactive: true,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
@@ -502,16 +504,25 @@ test("checkAgyConnectivity: exit 0 returns without throwing", () => {
   assert.doesNotThrow(() => checkAgyConnectivity("agy", fakeSpawn));
 });
 
+// ─── parseCliArgs: default and new flags ─────────────────────────────────────
+
+test("parseCliArgs: interactive is true by default", () => {
+  const parsed = parseCliArgs(["some task"]);
+  assert.equal(parsed.interactive, true, "interactive should default to true");
+});
+
+test("parseCliArgs: --headless sets interactive to false", () => {
+  const parsed = parseCliArgs(["--headless", "some task"]);
+  assert.equal(parsed.interactive, false, "--headless should disable agent mode");
+});
+
 // ─── main: spawnSync fallback (no node-pty) ──────────────────────────────────
 
 test("main: spawnSync fallback writes captured stdout to _stdout", async () => {
   const stdoutChunks = [];
-  const stderrChunks = [];
 
-  // Simulate: which succeeds, --version succeeds, pty unavailable, agy --print succeeds
   const fakeSpawnSync = (_cmd, args, _opts) => {
     if (args[0] === "--version") return { status: 0, stdout: "agy 1.0.0", stderr: "" };
-    // agy actual run via spawnSync fallback
     return { status: 0, stdout: "AGY output line\n", stderr: "" };
   };
 
@@ -519,7 +530,7 @@ test("main: spawnSync fallback writes captured stdout to _stdout", async () => {
     _spawnSync: fakeSpawnSync,
     _loadNodePty: () => null,
     _stdout: { write: (chunk) => stdoutChunks.push(String(chunk)) },
-    _stderr: { write: (chunk) => stderrChunks.push(String(chunk)) },
+    _stderr: { write: () => {} },
     _isTTY: false,
   });
 
@@ -527,7 +538,7 @@ test("main: spawnSync fallback writes captured stdout to _stdout", async () => {
   assert.ok(stdoutChunks.join("").includes("AGY output line"), "stdout should contain agy output");
 });
 
-test("main: spawnSync fallback with --agent emits warning instead of throwing", async () => {
+test("main: spawnSync fallback in agent mode emits warning", async () => {
   const stderrChunks = [];
 
   const fakeSpawnSync = (_cmd, args, _opts) => {
@@ -535,7 +546,7 @@ test("main: spawnSync fallback with --agent emits warning instead of throwing", 
     return { status: 0, stdout: "agent output\n", stderr: "" };
   };
 
-  const exitCode = await main(["--agent", "--add-dir", ".", "create a file"], {
+  const exitCode = await main(["--add-dir", ".", "create a file"], {
     _spawnSync: fakeSpawnSync,
     _loadNodePty: () => null,
     _stdout: { write: () => {} },
@@ -545,7 +556,7 @@ test("main: spawnSync fallback with --agent emits warning instead of throwing", 
 
   assert.equal(exitCode, 0);
   const stderrText = stderrChunks.join("");
-  assert.ok(stderrText.includes("Warning"), "should emit a warning, not throw");
+  assert.ok(stderrText.includes("Warning"), "should emit a warning");
   assert.ok(stderrText.includes("spawnSync"), "warning should mention spawnSync fallback");
 });
 
@@ -570,24 +581,46 @@ test("main: spawnSync fallback strips ANSI codes from captured output", async ()
   assert.ok(!out.includes("\x1b["), "ANSI escape codes should be stripped");
 });
 
-test("main: --agent without TTY auto-adds --dangerously-skip-permissions", async () => {
-  const capturedArgs = [];
+test("main: spawnSync fallback in agent mode auto-adds --dangerously-skip-permissions", async () => {
+  const capturedAgyArgs = [];
+
+  const fakeSpawnSync = (_cmd, args, _opts) => {
+    if (args[0] === "--version") return { status: 0, stdout: "agy 1.0.0", stderr: "" };
+    capturedAgyArgs.push(...args);
+    return { status: 0, stdout: "", stderr: "" };
+  };
+
+  await main(["create a file"], {
+    _spawnSync: fakeSpawnSync,
+    _loadNodePty: () => null,
+    _stdout: { write: () => {} },
+    _stderr: { write: () => {} },
+    _isTTY: false,
+  });
+
+  assert.ok(
+    capturedAgyArgs.includes("--dangerously-skip-permissions"),
+    "spawnSync fallback should auto-add --dangerously-skip-permissions in agent mode without TTY",
+  );
+});
+
+test("main: PTY path does NOT auto-add --dangerously-skip-permissions", async () => {
+  const capturedPtyArgs = [];
 
   const fakePty = {
-    spawn: (exe, args, _opts) => {
-      capturedArgs.push(...args);
-      const dataHandlers = [];
+    spawn: (_exe, args, _opts) => {
+      capturedPtyArgs.push(...args);
       const exitHandlers = [];
       setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode: 0 })), 0);
       return {
-        onData: (fn) => dataHandlers.push(fn),
+        onData: () => {},
         onExit: (fn) => exitHandlers.push(fn),
         kill: () => {},
       };
     },
   };
 
-  await main(["--agent", "--add-dir", ".", "build a file"], {
+  await main(["--add-dir", ".", "build a file"], {
     _spawnSync: () => ({ status: 0, stdout: "agy 1.0.0", stderr: "" }),
     _loadNodePty: () => fakePty,
     _stdout: { write: () => {} },
@@ -596,20 +629,25 @@ test("main: --agent without TTY auto-adds --dangerously-skip-permissions", async
   });
 
   assert.ok(
-    capturedArgs.includes("--dangerously-skip-permissions"),
-    "--dangerously-skip-permissions should be injected when --agent + no TTY",
+    !capturedPtyArgs.includes("--dangerously-skip-permissions"),
+    "PTY path should not auto-add skip-permissions; trust prompts are surfaced via BRIDGE_ASK_USER",
   );
 });
 
-test("main: --agent with TTY does NOT auto-add --dangerously-skip-permissions", async () => {
-  const capturedArgs = [];
+// ─── spawnViaConPty: interactive prompt detection ─────────────────────────────
 
-  const fakePty = {
-    spawn: (exe, args, _opts) => {
-      capturedArgs.push(...args);
+test("spawnViaConPty: detects workspace trust prompt and emits BRIDGE_ASK_USER", async () => {
+  const stdoutChunks = [];
+
+  const pty = {
+    spawn: () => {
       const dataHandlers = [];
       const exitHandlers = [];
-      setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode: 0 })), 0);
+      setTimeout(() => {
+        dataHandlers.forEach((fn) =>
+          fn("Welcome to AGY\n\nDo you trust the contents of this project?\n\n> Yes, I trust this folder\n  No, exit\n"),
+        );
+      }, 0);
       return {
         onData: (fn) => dataHandlers.push(fn),
         onExit: (fn) => exitHandlers.push(fn),
@@ -618,17 +656,80 @@ test("main: --agent with TTY does NOT auto-add --dangerously-skip-permissions", 
     },
   };
 
-  await main(["--agent", "--add-dir", ".", "build a file"], {
-    _spawnSync: () => ({ status: 0, stdout: "agy 1.0.0", stderr: "" }),
-    _loadNodePty: () => fakePty,
-    _stdout: { write: () => {} },
-    _stderr: { write: () => {} },
-    _isTTY: true,
+  const code = await spawnViaConPty("agy", ["--prompt-interactive", "task"], pty, 3000, {
+    write: (chunk) => stdoutChunks.push(String(chunk)),
   });
 
+  assert.equal(code, EXIT_NEEDS_INPUT, "should return EXIT_NEEDS_INPUT");
+  const out = stdoutChunks.join("");
+  assert.ok(out.startsWith("BRIDGE_ASK_USER:"), "should emit BRIDGE_ASK_USER prefix");
+  const json = JSON.parse(out.replace("BRIDGE_ASK_USER:", "").trim());
+  assert.ok(json.question.includes("Do you trust"), "question should describe the prompt");
+  assert.equal(json.yes_flag, "--skip-permissions", "yes_flag should be --skip-permissions");
+  assert.ok(Array.isArray(json.options) && json.options.length >= 2, "should provide options");
+});
+
+test("spawnViaConPty: normal output does not trigger BRIDGE_ASK_USER", async () => {
+  const stdoutChunks = [];
+
+  const pty = {
+    spawn: () => {
+      const dataHandlers = [];
+      const exitHandlers = [];
+      setTimeout(() => {
+        dataHandlers.forEach((fn) => fn("Here is the analysis result.\n"));
+        exitHandlers.forEach((fn) => fn({ exitCode: 0 }));
+      }, 0);
+      return {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: (fn) => exitHandlers.push(fn),
+        kill: () => {},
+      };
+    },
+  };
+
+  const code = await spawnViaConPty("agy", ["--print", "task"], pty, 3000, {
+    write: (chunk) => stdoutChunks.push(String(chunk)),
+  });
+
+  assert.equal(code, 0);
+  const out = stdoutChunks.join("");
+  assert.ok(!out.includes("BRIDGE_ASK_USER"), "normal output should not emit BRIDGE_ASK_USER");
+  assert.ok(out.includes("analysis result"), "normal output should be forwarded");
+});
+
+test("main: PTY EXIT_NEEDS_INPUT returns 0 to caller", async () => {
+  // Simulates: AGY emits a trust prompt → spawnViaConPty detects it → main returns 0
+  const stdoutChunks = [];
+
+  const fakePty = {
+    spawn: () => {
+      const dataHandlers = [];
+      setTimeout(() => {
+        dataHandlers.forEach((fn) =>
+          fn("Do you trust the contents of this project?\n> Yes\n"),
+        );
+      }, 0);
+      return {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: () => {},
+        kill: () => {},
+      };
+    },
+  };
+
+  const exitCode = await main(["build a file"], {
+    _spawnSync: () => ({ status: 0, stdout: "agy 1.0.0", stderr: "" }),
+    _loadNodePty: () => fakePty,
+    _stdout: { write: (chunk) => stdoutChunks.push(String(chunk)) },
+    _stderr: { write: () => {} },
+    _isTTY: false,
+  });
+
+  assert.equal(exitCode, 0, "main should return 0 when BRIDGE_ASK_USER is emitted");
   assert.ok(
-    !capturedArgs.includes("--dangerously-skip-permissions"),
-    "--dangerously-skip-permissions should NOT be injected when --agent has a real TTY",
+    stdoutChunks.join("").includes("BRIDGE_ASK_USER:"),
+    "BRIDGE_ASK_USER line should be present in stdout",
   );
 });
 
