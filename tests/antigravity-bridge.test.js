@@ -9,6 +9,7 @@ import {
   buildAntigravityPrompt,
   checkAgyConnectivity,
   collectContextFiles,
+  main,
   parseCliArgs,
   resolveAgyExe,
   spawnViaConPty,
@@ -499,5 +500,73 @@ test("checkAgyConnectivity: non-zero exit code throws authentication hint", () =
 test("checkAgyConnectivity: exit 0 returns without throwing", () => {
   const fakeSpawn = () => ({ error: null, status: 0, stdout: "agy 1.2.3", stderr: "" });
   assert.doesNotThrow(() => checkAgyConnectivity("agy", fakeSpawn));
+});
+
+// ─── main: spawnSync fallback (no node-pty) ──────────────────────────────────
+
+test("main: spawnSync fallback writes captured stdout to _stdout", async () => {
+  const stdoutChunks = [];
+  const stderrChunks = [];
+
+  // Simulate: which succeeds, --version succeeds, pty unavailable, agy --print succeeds
+  const fakeSpawnSync = (_cmd, args, _opts) => {
+    if (args[0] === "--version") return { status: 0, stdout: "agy 1.0.0", stderr: "" };
+    // agy actual run via spawnSync fallback
+    return { status: 0, stdout: "AGY output line\n", stderr: "" };
+  };
+
+  const exitCode = await main(["task text"], {
+    _spawnSync: fakeSpawnSync,
+    _loadNodePty: () => null,
+    _stdout: { write: (chunk) => stdoutChunks.push(String(chunk)) },
+    _stderr: { write: (chunk) => stderrChunks.push(String(chunk)) },
+    _isTTY: false,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(stdoutChunks.join("").includes("AGY output line"), "stdout should contain agy output");
+});
+
+test("main: spawnSync fallback with --agent emits warning instead of throwing", async () => {
+  const stderrChunks = [];
+
+  const fakeSpawnSync = (_cmd, args, _opts) => {
+    if (args[0] === "--version") return { status: 0, stdout: "agy 1.0.0", stderr: "" };
+    return { status: 0, stdout: "agent output\n", stderr: "" };
+  };
+
+  const exitCode = await main(["--agent", "--add-dir", ".", "create a file"], {
+    _spawnSync: fakeSpawnSync,
+    _loadNodePty: () => null,
+    _stdout: { write: () => {} },
+    _stderr: { write: (chunk) => stderrChunks.push(String(chunk)) },
+    _isTTY: false,
+  });
+
+  assert.equal(exitCode, 0);
+  const stderrText = stderrChunks.join("");
+  assert.ok(stderrText.includes("Warning"), "should emit a warning, not throw");
+  assert.ok(stderrText.includes("spawnSync"), "warning should mention spawnSync fallback");
+});
+
+test("main: spawnSync fallback strips ANSI codes from captured output", async () => {
+  const stdoutChunks = [];
+
+  const fakeSpawnSync = (_cmd, args, _opts) => {
+    if (args[0] === "--version") return { status: 0, stdout: "agy 1.0.0", stderr: "" };
+    return { status: 0, stdout: "\x1b[32mcolored output\x1b[0m\n", stderr: "" };
+  };
+
+  await main(["task text"], {
+    _spawnSync: fakeSpawnSync,
+    _loadNodePty: () => null,
+    _stdout: { write: (chunk) => stdoutChunks.push(String(chunk)) },
+    _stderr: { write: () => {} },
+    _isTTY: false,
+  });
+
+  const out = stdoutChunks.join("");
+  assert.ok(out.includes("colored output"), "text content should be present");
+  assert.ok(!out.includes("\x1b["), "ANSI escape codes should be stripped");
 });
 

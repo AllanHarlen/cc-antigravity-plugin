@@ -807,12 +807,13 @@ export async function main(argv = process.argv.slice(2), {
 
     if (parsed.interactive) {
       if (!ptyModule) {
-        throw new Error(
-          "--agent/--interactive requires PTY support (node-pty) which is not available in this environment.\n" +
-            "Use the default headless mode (omit --agent/--interactive) or run AGY directly in an interactive terminal.",
+        logEvent("bridge.interactive.no-pty");
+        _stderr.write(
+          "Warning: --agent/--interactive: node-pty unavailable; falling back to spawnSync. " +
+            "AGY workspace-editing will run headlessly — file creation works but " +
+            "interactive prompts will not be supported.\n",
         );
-      }
-      if (!_isTTY) {
+      } else if (!_isTTY) {
         logEvent("bridge.interactive.no-tty");
         _stderr.write(
           "Warning: --agent/--interactive is running without a terminal (no TTY detected). " +
@@ -840,8 +841,12 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     // Fallback for platforms or installs where node-pty is unavailable.
+    // stdio:"pipe" ensures output is captured and forwarded to _stdout/_stderr rather than
+    // going to the parent process's stdout untracked (which loses it in non-TTY contexts).
     logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
-    const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
+    const result = _spawnSync(agyExe, agyArgs, { stdio: "pipe", encoding: "utf8" });
+    if (result.stdout) _stdout.write(stripAnsi(result.stdout));
+    if (result.stderr) _stderr.write(stripAnsi(result.stderr));
     if (result.error) {
       logEvent("agy.spawnsync.error", {
         code: result.error.code,
