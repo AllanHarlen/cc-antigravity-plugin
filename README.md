@@ -31,29 +31,23 @@ agy --print "what is 2+2"
 
 ### Via Marketplace do Claude Code (recomendado)
 
-```bash
-claude plugin install AllanHarlen/cc-antigravity-plugin
-```
-
-Ou dentro do Claude Code:
+Dentro do Claude Code, execute os três comandos em sequência:
 
 ```
-/plugin install AllanHarlen/cc-antigravity-plugin
+/plugin marketplace add AllanHarlen/cc-antigravity-plugin
+/plugin install cc-antigravity-plugin@cc-antigravity-plugin
+/reload-plugins
 ```
 
-Após instalar, reinicie o Claude Code para carregar o plugin.
+O primeiro comando registra o repositório GitHub como fonte de marketplace. O segundo instala o plugin a partir dessa fonte. O terceiro recarrega os plugins na sessão atual.
 
 ### Instalação Local (desenvolvimento)
 
-Para testar uma cópia local do repositório:
+Para testar uma cópia local do repositório clonado:
 
 ```
-/plugin install ./
-```
-
-Recarregue os plugins depois:
-
-```
+/plugin marketplace add ./
+/plugin install cc-antigravity-plugin@cc-antigravity-plugin
 /reload-plugins
 ```
 
@@ -196,12 +190,15 @@ npm test
 
 Para testar localmente o plugin dentro do Claude Code com logs em tempo real:
 
-```bash
-# Instalar a versão local do plugin
-/plugin install ./
+```
+/plugin marketplace add ./
+/plugin install cc-antigravity-plugin@cc-antigravity-plugin
 /reload-plugins
+```
 
-# Rodar um ciclo de teste
+Em seguida, rode um ciclo de teste:
+
+```
 /cc-antigravity-plugin:antigravity --files package.json --timeout 2m responda apenas plugin-log-ok
 ```
 
