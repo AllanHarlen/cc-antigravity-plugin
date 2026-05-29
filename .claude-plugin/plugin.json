@@ -30,7 +30,6 @@
     "agents": [
         "./agents/antigravity-agent.md"
     ],
-    "hooks": "./hooks/hooks.json",
     "requiresExternalTool": {
         "name": "agy",
         "installUrl": "https://antigravity.google/cli/install.sh",
