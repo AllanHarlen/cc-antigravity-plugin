@@ -625,7 +625,7 @@ ${task}
 </constraints>`;
 }
 
-export function buildImagePrompt({ task, context }) {
+export function buildImagePrompt({ task, context, outputDir }) {
   const inventoryLines = [];
 
   if (context.included.length > 0) {
@@ -672,7 +672,8 @@ ${task}
 <constraints>
 - You are an image generation assistant. Generate the image described in the task using the generate_imagem tool.
 - Use generate_imagem with the exact description from the task above as the prompt.
-- After generating, save the image file using write_to_file and report its path.
+- After generating, save the image file using write_to_file to the directory: ${outputDir ?? process.cwd()}
+  Use the exact filename produced by generate_imagem (keep the original extension).
 - If inline context files are provided, use them to inform the visual style or content of the image.
 - If you hit a quota or rate limit, immediately output on its own line and then stop:
   QUOTA_EXAUSTED reason="<specific reason>" model="<model name>"
@@ -1021,7 +1022,7 @@ export async function main(argv = process.argv.slice(2), {
       logEvent("bridge.model.resolved", { model, source: modelSource });
     }
     const prompt = parsed.generateImagem
-      ? buildImagePrompt({ task: parsed.task, context })
+      ? buildImagePrompt({ task: parsed.task, context, outputDir: process.cwd() })
       : buildAntigravityPrompt({ task: parsed.task, context });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
