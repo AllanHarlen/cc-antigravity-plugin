@@ -10,7 +10,7 @@
             "name": "cc-antigravity-plugin",
             "displayName": "Antigravity Agentic Coder",
             "description": "Invoke Antigravity CLI (AGY) as an agentic coding assistant — creates, edits, searches, and runs commands autonomously. QUOTA_EXAUSTED signaling and structured exit codes for workflow orchestration.",
-            "version": "3.4.2",
+            "version": "3.5.1",
             "author": {
                 "name": "Allan Harlen",
                 "email": "allanharlen@gmail.com"
