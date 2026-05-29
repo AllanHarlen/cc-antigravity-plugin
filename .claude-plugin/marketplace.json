@@ -1,6 +1,6 @@
 {
     "name": "cc-antigravity-plugin",
-    "description": "Antigravity CLI (AGY) integration for Claude Code with model selection, conversation continuity, and shared runtime support",
+    "description": "Agentic coding assistant powered by Antigravity CLI (AGY) — creates, edits, and searches files autonomously. Includes model forwarding via settings.json, QUOTA_EXAUSTED signaling, and structured exit codes.",
     "owner": {
         "name": "Allan Harlen",
         "email": "allanharlen@gmail.com"
@@ -8,9 +8,9 @@
     "plugins": [
         {
             "name": "cc-antigravity-plugin",
-            "displayName": "Antigravity CLI Integration",
-            "description": "Invoke Antigravity CLI (AGY) for long-context code exploration, architecture review, and codebase analysis with model selection and conversation continuity",
-            "version": "3.2.0",
+            "displayName": "Antigravity Agentic Coder",
+            "description": "Invoke Antigravity CLI (AGY) as an agentic coding assistant — creates, edits, searches, and runs commands autonomously. QUOTA_EXAUSTED signaling and structured exit codes for workflow orchestration.",
+            "version": "3.3.0",
             "author": {
                 "name": "Allan Harlen",
                 "email": "allanharlen@gmail.com"
@@ -22,8 +22,8 @@
                 "agy",
                 "google",
                 "gemini",
-                "long-context",
-                "code-exploration"
+                "agentic",
+                "code-generation"
             ],
             "keywords": [
                 "antigravity",

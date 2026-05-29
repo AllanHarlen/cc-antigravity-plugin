@@ -11,7 +11,9 @@ import {
   classifyAgyOutput,
   collectContextFiles,
   parseCliArgs,
+  patchAgySettings,
   resolveAgyExe,
+  resolveAgySettingsPath,
   spawnViaConPty,
   stripAnsi,
   EXIT_QUOTA_EXAUSTED,
@@ -147,7 +149,7 @@ test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {
   ]);
 });
 
-test("buildAntigravityArgs does not forward model or format to AGY", () => {
+test("buildAntigravityArgs does not include model or format in CLI args (model is applied via settings.json)", () => {
   const args = buildAntigravityArgs({ prompt: "x", model: "gemini-3.1-pro-low", format: "json" });
   assert.equal(args.length, 2);
   assert.ok(!args.some((a) => a.startsWith("--model") || a.startsWith("--format")));
@@ -577,6 +579,60 @@ test("classifyAgyOutput returns null for empty output", () => {
 });
 
 // ─── spawnViaConPty — outputAccumulator ───────────────────────────────────────
+
+test("collectContextFiles skips file with invalid UTF-8 encoding", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-encoding-"));
+  // Bytes 0xe9 0xe0 0xe8 are valid Latin-1 (é à è) but invalid UTF-8 sequences
+  await fs.writeFile(path.join(tempDir, "latin1.txt"), Buffer.from([0xe9, 0xe0, 0xe8]));
+
+  const context = await collectContextFiles({
+    cwd: tempDir,
+    patterns: ["*.txt"],
+    maxFiles: 10,
+    maxFileBytes: 1024,
+  });
+
+  assert.equal(context.included.length, 0);
+  assert.equal(context.skipped.length, 1);
+  assert.equal(context.skipped[0].reason, "encoding-error");
+});
+
+// ─── resolveAgySettingsPath ───────────────────────────────────────────────────
+
+test("resolveAgySettingsPath returns a string ending in settings.json", () => {
+  const p = resolveAgySettingsPath();
+  assert.ok(typeof p === "string" && p.endsWith("settings.json"), `unexpected path: ${p}`);
+});
+
+// ─── patchAgySettings ────────────────────────────────────────────────────────
+
+test("patchAgySettings writes model and restores original content", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-patch-"));
+  const settingsPath = path.join(tempDir, "settings.json");
+
+  await fs.writeFile(settingsPath, JSON.stringify({ other: true }), "utf8");
+  const restore = await patchAgySettings(settingsPath, "gemini-3.1-pro-low");
+  const patched = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  assert.equal(patched.model, "gemini-3.1-pro-low");
+  assert.equal(patched.other, true, "existing fields must be preserved");
+
+  await restore();
+  const restored = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  assert.equal(restored.model, undefined, "model field must be removed on restore");
+  assert.equal(restored.other, true);
+});
+
+test("patchAgySettings creates settings.json when absent and removes it on restore", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-patch-new-"));
+  const settingsPath = path.join(tempDir, "settings.json");
+
+  const restore = await patchAgySettings(settingsPath, "gemini-2.5-pro");
+  const created = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  assert.equal(created.model, "gemini-2.5-pro");
+
+  await restore();
+  await assert.rejects(() => fs.readFile(settingsPath, "utf8"), "settings.json should be deleted on restore");
+});
 
 test("spawnViaConPty populates outputAccumulator when provided", async () => {
   const chunks = [];

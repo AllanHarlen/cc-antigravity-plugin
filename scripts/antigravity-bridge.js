@@ -112,7 +112,8 @@ Options:
                              Default: current working directory (added automatically).
   --files <glob,...>         File globs to ingest.
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
-  --model <name>             Requested model (parsed but not forwarded — AGY has no --model CLI flag).
+  --model <name>             Model to use. Written to AGY's settings.json before spawn and restored after.
+                             AGY has no --model CLI flag; settings.json is the only headless mechanism.
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
@@ -457,12 +458,14 @@ function collectDirectoryMatches(cwd, dirPath) {
   return walkDirSync(absoluteDir);
 }
 
-function collectPatternMatches(cwd, pattern) {
+function collectPatternMatches(cwd, patterns) {
+  if (patterns.length === 0) return [];
   const workspaceRoot = path.resolve(cwd);
-  const matcher = globToRegExp(pattern);
-  return walkDirSync(workspaceRoot).filter((absolutePath) =>
-    matcher.test(relativeToCwd(workspaceRoot, absolutePath)),
-  );
+  const matchers = patterns.map(globToRegExp);
+  return walkDirSync(workspaceRoot).filter((absolutePath) => {
+    const rel = relativeToCwd(workspaceRoot, absolutePath);
+    return matchers.some((m) => m.test(rel));
+  });
 }
 
 export async function collectContextFiles({
@@ -481,10 +484,8 @@ export async function collectContextFiles({
     }
   }
 
-  for (const pattern of patterns) {
-    for (const match of collectPatternMatches(cwd, pattern)) {
-      allMatches.add(path.resolve(workspaceRoot, match));
-    }
+  for (const match of collectPatternMatches(cwd, patterns)) {
+    allMatches.add(path.resolve(workspaceRoot, match));
   }
 
   const included = [];
@@ -520,12 +521,25 @@ export async function collectContextFiles({
       const truncated = fileBuffer.length > maxFileBytes;
       const trimmedBuffer = truncated ? fileBuffer.subarray(0, maxFileBytes) : fileBuffer;
 
+      let content;
+      try {
+        // Use fatal decode for non-truncated files so invalid encodings (e.g. Windows-1252)
+        // are caught early. Truncated buffers may cut a multi-byte sequence mid-stream, so
+        // fall back to the lenient decoder which replaces invalid sequences silently.
+        content = truncated
+          ? trimmedBuffer.toString("utf8")
+          : new TextDecoder("utf-8", { fatal: true }).decode(trimmedBuffer);
+      } catch {
+        skipped.push({ path: relativePath, reason: "encoding-error" });
+        continue;
+      }
+
       included.push({
         path: relativePath,
         mediaType: getMediaType(absolutePath),
         bytes: fileBuffer.length,
         truncated,
-        content: trimmedBuffer.toString("utf8"),
+        content,
       });
     } catch (error) {
       skipped.push({
@@ -597,7 +611,7 @@ ${task}
 
 export function buildAntigravityArgs({
   prompt,
-  model: _model,   // accepted but not forwarded; AGY has no --model CLI flag
+  model: _model,   // model is applied via settings.json before spawn, not via CLI flag
   format: _format, // accepted but not forwarded; AGY headless returns text only
   timeout,
   interactive = false,
@@ -708,6 +722,52 @@ function buildAgyMissingError() {
   );
   err.code = "EAGYMISSING";
   return err;
+}
+
+// Returns the path where AGY CLI reads its settings.json.
+// AGY has no --model flag; writing the model here is the only headless override.
+export function resolveAgySettingsPath() {
+  if (process.platform === "win32") {
+    return path.join(
+      process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+      "agy",
+      "settings.json",
+    );
+  }
+  return path.join(
+    process.env.XDG_CONFIG_HOME ?? path.join(process.env.HOME ?? "", ".config"),
+    "agy",
+    "settings.json",
+  );
+}
+
+// Writes the requested model into AGY's settings.json and returns an async restore
+// function that puts the file back to its original state (or removes it if it did
+// not exist). Callers MUST call the returned function in a finally block.
+export async function patchAgySettings(settingsPath, model) {
+  let originalContent = null;
+  try {
+    originalContent = await fsp.readFile(settingsPath, "utf8");
+  } catch {
+    // settings.json does not exist yet; we will create it and remove it on restore
+  }
+  const existing = originalContent ? JSON.parse(originalContent) : {};
+  await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fsp.writeFile(settingsPath, JSON.stringify({ ...existing, model }, null, 2), "utf8");
+  logEvent("agy.model.patch", { settingsPath, model });
+
+  return async () => {
+    try {
+      if (originalContent === null) {
+        await fsp.unlink(settingsPath);
+      } else {
+        await fsp.writeFile(settingsPath, originalContent, "utf8");
+      }
+    } catch {
+      // best-effort; leaving a stale settings.json is preferable to crashing
+    }
+    logEvent("agy.model.unpatch", { settingsPath });
+  };
 }
 
 export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
@@ -827,7 +887,10 @@ export async function main(argv = process.argv.slice(2), {
   _isTTY = Boolean(process.stdout.isTTY),
 } = {}) {
   try {
-    logEvent("bridge.start", { argv });
+    logEvent("bridge.start", {
+      flags: argv.filter((a) => a.startsWith("--")),
+      taskLength: argv.join(" ").length,
+    });
     const parsed = parseCliArgs(argv);
     logEvent("bridge.args.parsed", summarizeParsedArgs(parsed));
 
@@ -882,68 +945,79 @@ export async function main(argv = process.argv.slice(2), {
     const agyExe = resolveAgyExe(_spawnSync);
     checkAgyConnectivity(agyExe, _spawnSync);
 
-    const ptyModule = _loadNodePty();
+    // Patch AGY settings.json with the resolved model before spawning.
+    // AGY has no --model CLI flag; settings.json is the only headless model override.
+    const shouldPatch = Boolean(parsed.model || process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL);
+    const restoreAgySettings = shouldPatch
+      ? await patchAgySettings(resolveAgySettingsPath(), model)
+      : null;
 
-    if (parsed.interactive) {
-      if (!ptyModule) {
-        throw new Error(
-          "--agent/--interactive requires PTY support (node-pty) which is not available in this environment.\n" +
-            "Use the default headless mode (omit --agent/--interactive) or run AGY directly in an interactive terminal.",
-        );
-      }
-      if (!_isTTY) {
-        logEvent("bridge.interactive.no-tty");
-        _stderr.write(
-          "Warning: --agent/--interactive is running without a terminal (no TTY detected). " +
-            "AGY may hang waiting for user input. " +
-            "Use the default headless mode unless you have an interactive terminal attached.\n",
-        );
-      }
-    }
+    try {
+      const ptyModule = _loadNodePty();
 
-    if (ptyModule) {
-      const outputChunks = [];
-      let ptyExitCode;
-      try {
-        ptyExitCode = await spawnViaConPty(
-          agyExe,
-          agyArgs,
-          ptyModule,
-          timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
-          _stdout,
-          outputChunks,
-        );
-      } catch (err) {
-        if (err?.code === "ENOENT" || String(err).includes("not found")) {
+      if (parsed.interactive) {
+        if (!ptyModule) {
+          throw new Error(
+            "--agent/--interactive requires PTY support (node-pty) which is not available in this environment.\n" +
+              "Use the default headless mode (omit --agent/--interactive) or run AGY directly in an interactive terminal.",
+          );
+        }
+        if (!_isTTY) {
+          logEvent("bridge.interactive.no-tty");
+          _stderr.write(
+            "Warning: --agent/--interactive is running without a terminal (no TTY detected). " +
+              "AGY may hang waiting for user input. " +
+              "Use the default headless mode unless you have an interactive terminal attached.\n",
+          );
+        }
+      }
+
+      if (ptyModule) {
+        const outputChunks = [];
+        let ptyExitCode;
+        try {
+          ptyExitCode = await spawnViaConPty(
+            agyExe,
+            agyArgs,
+            ptyModule,
+            timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
+            _stdout,
+            outputChunks,
+          );
+        } catch (err) {
+          if (err?.code === "ENOENT" || String(err).includes("not found")) {
+            throw buildAgyMissingError();
+          }
+          throw err;
+        }
+        const fullOutput = outputChunks.join("");
+        const sig = classifyAgyOutput(fullOutput);
+        if (sig) {
+          emitStructuredSignal(sig.type, sig.reason, model, _stdout);
+          logEvent("bridge.classified", { type: sig.type, reason: sig.reason, model, exitCode: sig.exitCode });
+          return sig.exitCode;
+        }
+        return ptyExitCode;
+      }
+
+      // Fallback for platforms or installs where node-pty is unavailable.
+      logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
+      const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
+      if (result.error) {
+        logEvent("agy.spawnsync.error", {
+          code: result.error.code,
+          message: result.error.message,
+        });
+        if (result.error.code === "ENOENT") {
           throw buildAgyMissingError();
         }
-        throw err;
+        throw result.error;
       }
-      const fullOutput = outputChunks.join("");
-      const sig = classifyAgyOutput(fullOutput);
-      if (sig) {
-        emitStructuredSignal(sig.type, sig.reason, model, _stdout);
-        logEvent("bridge.classified", { type: sig.type, reason: sig.reason, model, exitCode: sig.exitCode });
-        return sig.exitCode;
-      }
-      return ptyExitCode;
+      logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
+      return result.status ?? EXIT_ERROR;
+    } finally {
+      await restoreAgySettings?.();
     }
-
-    // Fallback for platforms or installs where node-pty is unavailable.
-    logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
-    const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
-    if (result.error) {
-      logEvent("agy.spawnsync.error", {
-        code: result.error.code,
-        message: result.error.message,
-      });
-      if (result.error.code === "ENOENT") {
-        throw buildAgyMissingError();
-      }
-      throw result.error;
-    }
-    logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
-    return result.status ?? EXIT_ERROR;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("bridge.error", { message });

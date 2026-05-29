@@ -66,7 +66,7 @@ file ingestion, prompt assembly, QUOTA_EXAUSTED detection, and AGY invocation.
 | `--dirs <path,...>` | Inline directories into the bridge prompt |
 | `--files <glob,...>` | Inline targeted globs and mixed data formats |
 | `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
-| `--model <name>` | Requested model (parsed, not forwarded — AGY has no `--model` CLI flag) |
+| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after |
 | `--read-only` | Disable skip-permissions and workspace auto-add |
 | `--continue`, `-c` | Continue the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation |

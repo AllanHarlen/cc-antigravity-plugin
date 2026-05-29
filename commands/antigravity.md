@@ -27,7 +27,7 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 
 | Argument | Description | Example |
 |----------|-------------|---------|
-| `--model <name>` | Requested model (parsed, not forwarded — AGY has no `--model` CLI flag) | `--model gemini-3.1-pro-low` |
+| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. AGY has no `--model` CLI flag. | `--model gemini-3.1-pro-low` |
 | `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs` |
 | `--add-dir <path>` | Add a directory to AGY's native workspace. Repeatable | `--add-dir src` |
 | `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json"` |
