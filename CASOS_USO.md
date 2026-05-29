@@ -79,6 +79,8 @@ Usar Pro para tarefas que exigem mais raciocínio (design de schema, algoritmos,
 
 **Modelos disponíveis para raciocínio:** `gemini-3.1-pro-low`, `gemini-3.1-pro-high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`
 
+**Modelo para geração de imagem:** `nano-banana` (via `--generate-imagem`)
+
 ---
 
 ## UC07 — Seleção automática de modelo (`--model auto`)
@@ -175,6 +177,39 @@ Quando o AGY atinge o limite de cota, o bridge emite um sinal estruturado e indi
 
 ---
 
+## UC12 — Geração de imagem com Nano Banana (`--generate-imagem`)
+
+Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana do AGY.
+
+```
+/cc-antigravity-plugin:antigravity --generate-imagem \
+  "um skyline futurista ao pôr do sol, estilo cyberpunk, tons de roxo e laranja"
+```
+
+**O que acontece internamente:**
+1. O bridge define `--model nano-banana` automaticamente (sem precisar passar `--model`)
+2. O prompt enviado ao AGY inclui a constraint `generate_imagem` em vez das constraints de edição de código
+3. AGY usa a tool `generate_imagem` com a descrição e salva o arquivo via `write_to_file`
+4. O path do arquivo gerado é reportado no output
+
+**Com contexto de estilo (arquivos de referência):**
+```
+/cc-antigravity-plugin:antigravity --generate-imagem --files "brand/style.json" \
+  "logotipo para o produto seguindo o guia de identidade visual"
+```
+
+**Sobrescrever o modelo:**
+```
+/cc-antigravity-plugin:antigravity --generate-imagem --model gemini-3.1-pro-high \
+  "uma ilustração técnica detalhada de uma arquitetura de microserviços"
+```
+
+**Quando usar:** geração de assets visuais, mockups, ícones, ilustrações, diagramas e imagens para documentação.
+
+**Verificar:** o AGY reporta o path do arquivo gerado no output final.
+
+---
+
 ## Resultados de testes em runtime
 
 | Caso | Funcionalidade validada | Status | Observação |
@@ -184,6 +219,7 @@ Quando o AGY atinge o limite de cota, o bridge emite um sinal estruturado e indi
 | UC06 `gemini-3.1-pro-low` | Model forwarding via settings.json | ✅ | AGY reportou `Gemini 3.1 Pro` |
 | UC06 `gemini-3.5-flash-high` | Identifier `gemini-3.5-flash-high` | ✅ | AGY reportou `Gemini 3.5 Flash` |
 | UC07 | `--model auto` contexto vazio | ✅ | `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` |
+| UC12 | `--generate-imagem` flag + nano-banana | ⬜ | Pendente |
 | UC04/UC03 | Modo agêntico (criar/editar arquivos) | ⬜ | Pendente |
 | UC09 | `--continue` retomar sessão | ⬜ | Pendente |
 | UC08 | Heartbeat tarefa longa | ⬜ | Pendente |

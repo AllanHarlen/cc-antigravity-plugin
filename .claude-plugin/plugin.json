@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.4.2",
+    "version": "3.5.0",
     "description": "Agentic coding assistant powered by Antigravity CLI (AGY) — creates, edits, and searches files autonomously with model selection, QUOTA_EXAUSTED signaling, and conversation continuity",
     "author": {
         "name": "Allan Harlen",
@@ -39,7 +39,7 @@
         "default_model": {
             "type": "string",
             "title": "Default AGY Model",
-            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium, auto.",
+            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium, nano-banana (image generation via --generate-imagem), auto.",
             "default": "gemini-3.5-flash-medium"
         },
         "timeout": {

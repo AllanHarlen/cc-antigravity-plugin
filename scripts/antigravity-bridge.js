@@ -118,7 +118,10 @@ Options:
                              Available: gemini-3.5-flash-low, gemini-3.5-flash-medium (default),
                                         gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high,
                                         claude-4.6-sonnet-thinking, claude-4.6-opus-thinking,
-                                        gpt-oss-120b-medium, auto (selects flash tier by context size)
+                                        gpt-oss-120b-medium, nano-banana (image generation),
+                                        auto (selects flash tier by context size)
+  --generate-imagem          Generate an image from the task description using AGY's Nano Banana model.
+                             Defaults --model to nano-banana. Compatible with --model to override.
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
@@ -171,6 +174,7 @@ function summarizeParsedArgs(parsed) {
     maxFiles: parsed.maxFiles,
     maxFileBytes: parsed.maxFileBytes,
     printCommand: parsed.printCommand,
+    generateImagem: parsed.generateImagem,
     help: parsed.help,
     taskLength: parsed.task.length,
   };
@@ -298,6 +302,7 @@ export function parseCliArgs(argv) {
     maxFiles: DEFAULT_MAX_FILES,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     printCommand: false,
+    generateImagem: false,
     task: "",
     help: false,
   };
@@ -389,6 +394,9 @@ export function parseCliArgs(argv) {
         break;
       case "--print-command":
         parsed.printCommand = true;
+        break;
+      case "--generate-imagem":
+        parsed.generateImagem = true;
         break;
       default:
         taskTokens.push(token);
@@ -617,6 +625,60 @@ ${task}
 </constraints>`;
 }
 
+export function buildImagePrompt({ task, context }) {
+  const inventoryLines = [];
+
+  if (context.included.length > 0) {
+    inventoryLines.push("Included files:");
+    for (const file of context.included) {
+      inventoryLines.push(
+        `- ${file.path} | ${file.mediaType} | ${file.bytes} bytes | truncated=${file.truncated}`,
+      );
+    }
+  } else {
+    inventoryLines.push("Included files: none");
+  }
+
+  if (context.skipped.length > 0) {
+    inventoryLines.push("Skipped files:");
+    for (const skipped of context.skipped) {
+      inventoryLines.push(`- ${skipped.path} (${skipped.reason})`);
+    }
+  }
+
+  const fileBlocks =
+    context.included.length === 0
+      ? "No inline file payloads were collected."
+      : context.included
+          .map(
+            (file) => `<file path="${file.path}" media_type="${file.mediaType}" truncated="${file.truncated}">
+${file.content.replaceAll("</", "<\\/")}
+</file>`,
+          )
+          .join("\n\n");
+
+  return `<context_inventory>
+${inventoryLines.join("\n")}
+</context_inventory>
+
+<context_files>
+${fileBlocks}
+</context_files>
+
+<task>
+${task}
+</task>
+
+<constraints>
+- You are an image generation assistant. Generate the image described in the task using the generate_imagem tool.
+- Use generate_imagem with the exact description from the task above as the prompt.
+- After generating, save the image file using write_to_file and report its path.
+- If inline context files are provided, use them to inform the visual style or content of the image.
+- If you hit a quota or rate limit, immediately output on its own line and then stop:
+  QUOTA_EXAUSTED reason="<specific reason>" model="<model name>"
+</constraints>`;
+}
+
 export function buildAntigravityArgs({
   prompt,
   model: _model,   // model is applied via settings.json before spawn, not via CLI flag
@@ -749,6 +811,7 @@ const AGY_MODEL_LABELS = {
   "gemini-3.5-flash-high":   "Gemini 3.5 Flash (High)",
   "gemini-3.1-pro-low":      "Gemini 3.1 Pro (Low)",
   "gemini-3.1-pro-high":     "Gemini 3.1 Pro (High)",
+  "nano-banana":             "Nano Banana",
 };
 
 // Converts a bridge model identifier to the display label AGY stores in settings.json.
@@ -931,8 +994,8 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
-    let model = parsed.model ?? defaultModel;
-    const modelSource = parsed.model ? "flag" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default");
+    let model = parsed.model ?? (parsed.generateImagem ? "nano-banana" : defaultModel);
+    const modelSource = parsed.model ? "flag" : (parsed.generateImagem ? "generate-imagem-default" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"));
 
     // In agentic mode, automatically add cwd to the AGY workspace when the caller
     // did not specify any --add-dir. This gives AGY access to the project by default.
@@ -957,7 +1020,9 @@ export async function main(argv = process.argv.slice(2), {
     } else {
       logEvent("bridge.model.resolved", { model, source: modelSource });
     }
-    const prompt = buildAntigravityPrompt({ task: parsed.task, context });
+    const prompt = parsed.generateImagem
+      ? buildImagePrompt({ task: parsed.task, context })
+      : buildAntigravityPrompt({ task: parsed.task, context });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
       prompt,
@@ -983,7 +1048,7 @@ export async function main(argv = process.argv.slice(2), {
 
     // Patch AGY settings.json with the resolved model before spawning.
     // AGY has no --model CLI flag; settings.json is the only headless model override.
-    const shouldPatch = Boolean(parsed.model || process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL);
+    const shouldPatch = Boolean(parsed.model || parsed.generateImagem || process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL);
     const restoreAgySettings = shouldPatch
       ? await patchAgySettings(resolveAgySettingsPath(), model)
       : null;

@@ -8,6 +8,7 @@ import {
   agyModelLabel,
   buildAntigravityArgs,
   buildAntigravityPrompt,
+  buildImagePrompt,
   checkAgyConnectivity,
   classifyAgyOutput,
   collectContextFiles,
@@ -51,6 +52,7 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     maxFiles: 40,
     maxFileBytes: 32768,
     printCommand: false,
+    generateImagem: false,
     help: false,
     task: "analyze the workspace",
   });
@@ -737,5 +739,66 @@ test("spawnViaConPty populates outputAccumulator when provided", async () => {
   }, chunks);
   assert.equal(exitCode, 0);
   assert.deepEqual(chunks, ["hello ", "world"]);
+});
+
+// ─── generate_imagem / nano-banana ───────────────────────────────────────────
+
+test("parseCliArgs --generate-imagem sets generateImagem true", () => {
+  const parsed = parseCliArgs(["--generate-imagem", "a sunset over the ocean"]);
+  assert.equal(parsed.generateImagem, true);
+  assert.equal(parsed.task, "a sunset over the ocean");
+});
+
+test("parseCliArgs generateImagem is false by default", () => {
+  const parsed = parseCliArgs(["analyze this"]);
+  assert.equal(parsed.generateImagem, false);
+});
+
+test("parseCliArgs --generate-imagem does not contaminate model", () => {
+  const parsed = parseCliArgs(["--generate-imagem", "a cat"]);
+  assert.equal(parsed.model, undefined);
+});
+
+test("agyModelLabel maps nano-banana to Nano Banana", () => {
+  assert.equal(agyModelLabel("nano-banana"), "Nano Banana");
+});
+
+test("buildImagePrompt contains generate_imagem constraint", () => {
+  const prompt = buildImagePrompt({
+    task: "a futuristic city at night",
+    context: { included: [], skipped: [] },
+  });
+  assert.match(prompt, /generate_imagem/);
+  assert.match(prompt, /a futuristic city at night/);
+});
+
+test("buildImagePrompt renders task block and image-specific constraints", () => {
+  const prompt = buildImagePrompt({
+    task: "a red balloon",
+    context: { included: [], skipped: [] },
+  });
+  assert.match(prompt, /<task>\s*a red balloon\s*<\/task>/);
+  assert.match(prompt, /image generation assistant/);
+  assert.match(prompt, /write_to_file/);
+});
+
+test("buildImagePrompt includes context inventory when files are provided", () => {
+  const prompt = buildImagePrompt({
+    task: "a logo",
+    context: {
+      included: [
+        {
+          path: "style.json",
+          mediaType: "application/json",
+          bytes: 20,
+          truncated: false,
+          content: '{"color":"blue"}',
+        },
+      ],
+      skipped: [],
+    },
+  });
+  assert.match(prompt, /style\.json/);
+  assert.match(prompt, /application\/json/);
 });
 
