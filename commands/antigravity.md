@@ -1,7 +1,7 @@
 ---
 description: Invoke the Antigravity (AGY) bridge as an agentic coding assistant — creates, edits, and searches files autonomously using AGY's native tools
 allowed-tools: Bash, Glob, Read
-argument-hint: "[--model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--generate-image] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
@@ -27,7 +27,8 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 
 | Argument | Description | Example |
 |----------|-------------|---------|
-| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. AGY has no `--model` CLI flag. Available: `gemini-3.5-flash-low/medium/high`, `gemini-3.1-pro-low/high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`, `gpt-oss-120b-medium` | `--model gemini-3.1-pro-low` |
+| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. AGY has no `--model` CLI flag. Available: `gemini-3.5-flash-low/medium/high`, `gemini-3.1-pro-low/high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`, `gpt-oss-120b-medium`, `nano-banana` | `--model gemini-3.1-pro-low` |
+| `--generate-image` | Generate an image from the task description using AGY's Nano Banana model. Automatically sets `--model nano-banana` unless overridden with `--model`. | `--generate-image` |
 | `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs` |
 | `--add-dir <path>` | Add a directory to AGY's native workspace. Repeatable | `--add-dir src` |
 | `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json"` |
@@ -102,6 +103,16 @@ When exit code `10` or `11` is returned, a JSON line is written to stdout:
 ### Continue previous session
 ```bash
 /cc-antigravity-plugin:antigravity --continue fix the failing tests from the previous session
+```
+
+### Generate an image (Nano Banana model)
+```bash
+/cc-antigravity-plugin:antigravity --generate-image a futuristic city skyline at sunset
+```
+
+### Generate an image with style context from files
+```bash
+/cc-antigravity-plugin:antigravity --generate-image --files "brand/style.json" a logo for our product
 ```
 
 ## Error Handling
