@@ -164,7 +164,7 @@ npm test
 
 Cobertura: parse de argumentos · coleta de contexto · geração de prompt · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
 
-Para testes manuais de runtime contra o AGY real, consulte [`MANUAL_TESTS.md`](MANUAL_TESTS.md) — 12 casos de teste cobrindo conectividade, mode forwarding, criação de arquivos, `--read-only`, `--model auto`, heartbeat e `--continue`.
+Para exemplos práticos de uso em cenários reais, consulte [`MANUAL_TESTS.md`](MANUAL_TESTS.md) — 11 casos de uso cobrindo análise de arquitetura, refatoração multi-arquivo, geração de documentação, análise de impacto, `--model auto`, heartbeat, sessões contínuas e recuperação de QUOTA_EXAUSTED.
 
 ## Desenvolvimento
 

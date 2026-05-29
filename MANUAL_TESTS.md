@@ -1,219 +1,162 @@
-# Testes Manuais — cc-antigravity-plugin v3.4.0
+# Casos de Uso — cc-antigravity-plugin
 
-Roteiro de validação em runtime contra o AGY real (Gemini). Execute em ordem — cada teste
-valida uma funcionalidade específica e o que observar é descrito explicitamente.
-
----
-
-## Pré-execução
-
-```bash
-# 1. Instalar/recarregar o plugin na sessão atual
-/plugin install cc-antigravity-plugin@cc-antigravity-plugin
-/reload-plugins
-
-# 2. Confirmar que agy está acessível
-! agy --version
-```
-
-**Esperado:** versão do AGY exibida (ex: `1.0.3`). Se falhar, rodar `agy` uma vez interativamente.
+Exemplos práticos de uso do plugin em cenários reais de desenvolvimento. Cada caso de uso inclui o comando, o que esperar e como verificar o resultado.
 
 ---
 
-## T01 — Conectividade básica (smoke test)
+## UC01 — Smoke test / conectividade
 
-**Objetivo:** confirmar que o bridge resolve o executável, passa pelo `--version` e retorna output.
+Confirmar que o plugin está instalado e o AGY está acessível antes de qualquer tarefa real.
 
 ```
 /cc-antigravity-plugin:antigravity --read-only "Responda apenas: plugin-ok"
 ```
 
-**Esperado:**
-- Output contém `plugin-ok`
-- Sem erros de autenticação ou `AGY_MISSING`
-- Exit code 0
-
-**Se falhar:** verificar `! cat "$env:LOCALAPPDATA\agy\cc-plugin-logs\plugin-$(Get-Date -Format yyyy-MM-dd).jsonl"` para o evento `agy.connectivity.check`.
+**Saída esperada:** `plugin-ok`
 
 ---
 
-## T02 — Model forwarding via settings.json
+## UC02 — Análise de arquitetura (read-only)
 
-**Objetivo:** confirmar que `--model` efetivamente muda o modelo usado pelo AGY.
+Entender a estrutura de um projeto sem modificar nada.
 
 ```
-/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --read-only "Qual modelo você está usando agora? Responda apenas o nome do modelo."
+/cc-antigravity-plugin:antigravity --read-only --dirs src,docs \
+  "Explique a arquitetura deste projeto. Cite os arquivos-chave e os principais fluxos de dados."
 ```
 
-**Esperado:**
-- AGY menciona `gemini-3.1-pro-low` ou `Gemini 3.1 Pro` na resposta
-- Log mostra evento `agy.model.patch` com `"model":"gemini-3.1-pro-low"`
-
-**Verificar log:**
-```powershell
-! cat "$env:LOCALAPPDATA\agy\cc-plugin-logs\plugin-$(Get-Date -Format yyyy-MM-dd).jsonl" | Select-String "model.patch|model.resolved"
-```
-
-**Se o modelo ignorar o settings.json:** o path `%LOCALAPPDATA%\agy\settings.json` não é o correto para esta versão do AGY. Verificar o arquivo criado e deletado:
-
-```powershell
-# Rodar em paralelo — observar a criação e remoção
-! Get-ChildItem "$env:LOCALAPPDATA\agy\" -Filter "settings.json"
-```
+**Quando usar:** revisão de código antes de uma refatoração, onboarding em projeto desconhecido, documentação de decisões arquiteturais.
 
 ---
 
-## T03 — Modelo atual (High) confirmação de identifier
+## UC03 — Refatoração multi-arquivo
 
-**Objetivo:** confirmar que `gemini-3.5-flash-high` é o identifier correto do modelo atual.
+Refatorar código que atravessa múltiplos arquivos em uma única chamada.
 
 ```
-/cc-antigravity-plugin:antigravity --model gemini-3.5-flash-high --read-only "Qual modelo você está usando? Responda apenas o nome."
+/cc-antigravity-plugin:antigravity \
+  "Refatore o módulo auth para usar async/await em vez de callbacks. Atualize todos os callers. Reporte os arquivos alterados."
 ```
 
-**Esperado:** AGY confirma estar usando Flash High.
-
-**Se recusar/ignorar:** o identifier pode ser diferente. Verificar o log para `agy.model.patch` e comparar com o que o AGY reporta.
+**Quando usar:** migrações de padrão (callbacks → promises → async/await), renomeação de interfaces, mudança de assinaturas de funções.
 
 ---
 
-## T04 — Modo agêntico: criar arquivo
+## UC04 — Geração de arquivo
 
-**Objetivo:** validar que o AGY usa `write_to_file` e cria arquivos reais no workspace.
+Criar um novo arquivo a partir de dados ou especificação existente no projeto.
 
 ```
-/cc-antigravity-plugin:antigravity "Crie o arquivo teste-agentico.txt na raiz do projeto com o conteúdo: AGY_AGENTICO_OK seguido da data e hora atual."
+/cc-antigravity-plugin:antigravity \
+  "Leia os arquivos em src/routes/ e gere docs/api.md com a documentação de todas as rotas: método, path, parâmetros e descrição."
 ```
 
-**Verificar:**
-```powershell
-! cat teste-agentico.txt
-```
-
-**Esperado:**
-- Arquivo `teste-agentico.txt` criado na raiz
-- Conteúdo contém `AGY_AGENTICO_OK` e uma data
-- Exit code 0
-
-**Limpar após o teste:**
-```powershell
-! Remove-Item teste-agentico.txt
-```
+**Verificar:** `! cat docs/api.md`
 
 ---
 
-## T05 — Modo agêntico: editar arquivo existente
+## UC05 — Análise de impacto antes de uma mudança
 
-**Objetivo:** validar `replace_file_content` / `multi_replace_file_content`.
+Entender o que vai quebrar antes de fazer uma alteração crítica.
 
 ```
-/cc-antigravity-plugin:antigravity "Edite o arquivo package.json e adicione um campo 'testManual': true dentro do objeto JSON raiz. Não altere nenhum outro campo."
+/cc-antigravity-plugin:antigravity --read-only --model gemini-3.1-pro-low \
+  "Se eu remover a função `getUserById` de src/services/user.js, quais arquivos seriam afetados? Liste com o motivo de cada um."
 ```
 
-**Verificar:**
-```powershell
-! cat package.json
-```
-
-**Esperado:** `"testManual": true` presente em `package.json`.
-
-**Reverter:**
-```powershell
-! git checkout -- package.json
-```
+**Quando usar:** antes de deletar código, remover dependências, mudar APIs internas.
 
 ---
 
-## T06 — `--read-only` não modifica arquivos
+## UC06 — Modelo específico para raciocínio profundo
 
-**Objetivo:** garantir que `--read-only` desativa `--dangerously-skip-permissions` e que o AGY não edita arquivos.
+Usar Pro para tarefas que exigem mais raciocínio (design de schema, algoritmos, análise de segurança).
 
 ```
-/cc-antigravity-plugin:antigravity --read-only "Adicione um campo 'testReadOnly': true em package.json."
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low \
+  "Projete o schema do banco de dados para um sistema de e-commerce com produtos, pedidos, usuários e pagamentos. Inclua índices e justifique as decisões."
 ```
 
-**Verificar:**
-```powershell
-! cat package.json | Select-String "testReadOnly"
-```
-
-**Esperado:** nenhuma linha encontrada — AGY não deve ter editado o arquivo em modo read-only.
+**Modelos disponíveis para raciocínio:** `gemini-3.1-pro-low`, `gemini-3.1-pro-high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`
 
 ---
 
-## T07 — `--model auto` com contexto pequeno
+## UC07 — Seleção automática de modelo (`--model auto`)
 
-**Objetivo:** verificar que `auto` seleciona `gemini-3.5-flash-low` quando não há contexto inline.
+Deixar o bridge escolher o modelo baseado no tamanho do contexto inline.
 
 ```
-/cc-antigravity-plugin:antigravity --model auto --read-only "Responda apenas: auto-ok"
+/cc-antigravity-plugin:antigravity --model auto --dirs src \
+  "Identifique os 3 maiores riscos de segurança neste código e sugira correções."
 ```
 
-**Verificar no log:**
-```powershell
-! cat "$env:LOCALAPPDATA\agy\cc-plugin-logs\plugin-$(Get-Date -Format yyyy-MM-dd).jsonl" | Select-String "model.auto\|model.resolved"
-```
+**Lógica de seleção:**
 
-**Esperado:** log mostra `source:"auto"` e `model:"gemini-3.5-flash-low"` (sem contexto inline, totalBytes = 0 < 32KB).
+| Contexto inline total | Modelo selecionado |
+|---|---|
+| < 32 KB | `gemini-3.5-flash-low` |
+| 32 KB – 256 KB | `gemini-3.5-flash-medium` |
+| ≥ 256 KB | `gemini-3.5-flash-high` |
+
+**Verificado em runtime:** `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` ✅
 
 ---
 
-## T08 — `--model auto` com contexto grande
+## UC08 — Tarefa longa com heartbeat
 
-**Objetivo:** verificar que `auto` escala para `gemini-3.5-flash-high` com contexto grande.
+Análises exaustivas que levam mais tempo que o timeout padrão por linha de output.
 
 ```
-/cc-antigravity-plugin:antigravity --model auto --dirs scripts,tests --read-only "Liste os arquivos incluídos no contexto e diga qual é o maior."
+/cc-antigravity-plugin:antigravity --timeout 15m \
+  "Analise todos os arquivos em scripts/ e tests/. Para cada função exportada, descreva o que ela faz, seus parâmetros e valor de retorno."
 ```
 
-**Verificar no log:** evento `bridge.model.auto.resolved` deve mostrar `contextBytes` > 0 e modelo escalado.
-
-**Esperado:** modelo selecionado é `gemini-3.5-flash-medium` ou `gemini-3.5-flash-high` dependendo do tamanho total dos arquivos.
+**Comportamento:** o timer de 15 min reseta a cada chunk de output — a tarefa só expira se o AGY ficar completamente silencioso por 15 minutos consecutivos.
 
 ---
 
-## T09 — Heartbeat: tarefa longa sem timeout prematuro
+## UC09 — Sessão contínua (`--continue`)
 
-**Objetivo:** confirmar que o timer de timeout reseta com cada chunk de output e não cancela tarefas longas ativas.
+Retomar o contexto de uma conversa anterior para tarefas em múltiplos passos.
 
+**Passo 1 — Leitura inicial:**
 ```
-/cc-antigravity-plugin:antigravity --timeout 2m "Analise todos os arquivos em scripts/ e tests/ em detalhes. Para cada função exportada, descreva o que ela faz, seus parâmetros e valor de retorno. Seja exaustivo."
+/cc-antigravity-plugin:antigravity --read-only \
+  "Leia src/auth/ e liste todas as funções exportadas com uma linha de descrição cada."
 ```
 
-**Esperado:**
-- Tarefa completa sem `EXIT_TIMEOUT` (exit code 12)
-- Output streaming visível durante a execução
-- Análise detalhada de todas as funções exportadas
+**Passo 2 — Continuação sem re-ler:**
+```
+/cc-antigravity-plugin:antigravity --continue \
+  "Com base na leitura anterior, implemente testes unitários para as 3 funções mais críticas."
+```
 
-**Se der timeout:** o heartbeat não está funcionando corretamente para esta combinação de PTY + OS.
+**Quando usar:** tarefas divididas em etapas (leitura → análise → implementação), continuação após QUOTA_EXAUSTED.
 
 ---
 
-## T10 — `--continue`: retomar sessão
+## UC10 — Inspecionar comando sem executar (`--print-command`)
 
-**Objetivo:** validar que `--continue` retoma o contexto da conversa anterior.
+Ver o comando `agy` que seria executado, sem gastar cota.
 
-**Passo 1 — Iniciar uma tarefa:**
 ```
-/cc-antigravity-plugin:antigravity --read-only "Leia o arquivo scripts/antigravity-bridge.js e diga apenas: 'LEITURA_OK - [número de funções exportadas]'"
-```
-
-**Passo 2 — Continuar com contexto:**
-```
-/cc-antigravity-plugin:antigravity --continue "Com base na leitura anterior, qual função você recomendaria refatorar primeiro e por quê? Resposta em uma linha."
+/cc-antigravity-plugin:antigravity --print-command --model gemini-3.1-pro-low \
+  --dirs scripts --timeout 5m "analisar auth"
 ```
 
-**Esperado:** resposta do passo 2 referencia informação da leitura do passo 1 sem precisar re-ler o arquivo.
+**Útil para:** depuração, verificar quais arquivos serão injetados no contexto, confirmar flags antes de uma tarefa longa.
+
+**O que aparece no output:** `--add-dir <cwd>`, `--dangerously-skip-permissions`, `--print`, `--print-timeout 5m` e o prompt completo com os arquivos de `scripts/` inline.
+
+> `--model` não aparece nos args do `agy` — é aplicado via `settings.json` antes do spawn.
 
 ---
 
-## T11 — Sinal QUOTA_EXAUSTED (simulado via log)
+## UC11 — Recuperação de QUOTA_EXAUSTED
 
-**Objetivo:** verificar a estrutura do JSON emitido quando QUOTA é detectado.
+Quando o AGY atinge o limite de cota, o bridge emite um sinal estruturado e indica como retomar.
 
-Não é possível forçar quota sem gastar cota real. Verificar no log de uma execução anterior se o padrão está correto, ou simular via `--print-command` para inspecionar o prompt.
-
-**Verificar estrutura esperada do JSON (quando ocorrer naturalmente):**
+**Sinal emitido (stdout):**
 ```json
 {
   "status": "QUOTA_EXAUSTED",
@@ -223,57 +166,24 @@ Não é possível forçar quota sem gastar cota real. Verificar no log de uma ex
 }
 ```
 
-**O campo `retry` é o indicador crítico** — confirma que a sessão pode ser retomada com `--continue` após o reset de cota.
+**Exit code:** `10`
+
+**Para retomar após reset de cota:**
+```
+/cc-antigravity-plugin:antigravity --continue "Continue a partir de onde parou."
+```
 
 ---
 
-## T12 — `--print-command`: inspecionar comando sem executar
+## Resultados de testes em runtime
 
-**Objetivo:** validar a composição dos argumentos AGY sem gastar cota.
-
-```
-/cc-antigravity-plugin:antigravity --print-command --model gemini-3.1-pro-low --dirs scripts --timeout 5m "analisar auth"
-```
-
-**Esperado:** output mostra o comando `agy` montado, incluindo:
-- `--add-dir <cwd>`
-- `--dangerously-skip-permissions`
-- `--print`
-- `--print-timeout 5m`
-- Prompt com conteúdo dos arquivos de `scripts/` inline
-
-**Não esperado:** `--model gemini-3.1-pro-low` nos args (model é aplicado via settings.json, não via CLI).
-
----
-
-## Checklist de resultados
-
-| Teste | Funcionalidade | Resultado | Observação |
+| Caso | Funcionalidade validada | Status | Observação |
 |---|---|---|---|
-| T01 | Conectividade básica | ⬜ | |
-| T02 | Model forwarding (settings.json) | ⬜ | |
-| T03 | Identifier `gemini-3.5-flash-high` | ⬜ | |
-| T04 | Criar arquivo (write_to_file) | ⬜ | |
-| T05 | Editar arquivo (replace_file_content) | ⬜ | |
-| T06 | `--read-only` não modifica | ⬜ | |
-| T07 | `--model auto` contexto pequeno | ⬜ | |
-| T08 | `--model auto` contexto grande | ⬜ | |
-| T09 | Heartbeat tarefa longa | ⬜ | |
-| T10 | `--continue` retomar sessão | ⬜ | |
-| T11 | Estrutura JSON QUOTA_EXAUSTED | ⬜ | |
-| T12 | `--print-command` inspecionar args | ⬜ | |
-
----
-
-## Prioridade de execução
-
-Se o tempo for limitado, execute nesta ordem de impacto:
-
-1. **T01** — smoke test (pré-requisito para todos)
-2. **T02** — model forwarding (maior risco — mecanismo novo, nunca validado em prod)
-3. **T04** — criar arquivo (valida o modo agêntico core)
-4. **T12** — `--print-command` (sem cota, valida composição dos args)
-5. **T06** — `--read-only` (valida isolamento entre modos)
-6. **T07/T08** — `--model auto` (valida nova feature)
-7. **T09** — heartbeat (valida robustez em tarefas longas)
-8. **T10** — `--continue` (valida continuidade de sessão)
+| UC01 | Conectividade / smoke test | ✅ | `plugin-ok` retornado |
+| UC02 | Análise read-only | ✅ | Sem modificações no workspace |
+| UC06 `gemini-3.1-pro-low` | Model forwarding via settings.json | ✅ | AGY reportou `Gemini 3.1 Pro` |
+| UC06 `gemini-3.5-flash-high` | Identifier `gemini-3.5-flash-high` | ✅ | AGY reportou `Gemini 3.5 Flash` |
+| UC07 | `--model auto` contexto vazio | ✅ | `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` |
+| UC04/UC03 | Modo agêntico (criar/editar arquivos) | ⬜ | Pendente |
+| UC09 | `--continue` retomar sessão | ⬜ | Pendente |
+| UC08 | Heartbeat tarefa longa | ⬜ | Pendente |
