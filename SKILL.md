@@ -66,7 +66,7 @@ file ingestion, prompt assembly, QUOTA_EXAUSTED detection, and AGY invocation.
 | `--dirs <path,...>` | Inline directories into the bridge prompt |
 | `--files <glob,...>` | Inline targeted globs and mixed data formats |
 | `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
-| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after |
+| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. Options: `gemini-3.5-flash-low/medium/high`, `gemini-3.1-pro-low/high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`, `gpt-oss-120b-medium` |
 | `--read-only` | Disable skip-permissions and workspace auto-add |
 | `--continue`, `-c` | Continue the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation |

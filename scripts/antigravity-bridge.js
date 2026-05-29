@@ -114,6 +114,10 @@ Options:
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
   --model <name>             Model to use. Written to AGY's settings.json before spawn and restored after.
                              AGY has no --model CLI flag; settings.json is the only headless mechanism.
+                             Available: gemini-3.5-flash-low, gemini-3.5-flash-medium (default),
+                                        gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high,
+                                        claude-4.6-sonnet-thinking, claude-4.6-opus-thinking,
+                                        gpt-oss-120b-medium
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).

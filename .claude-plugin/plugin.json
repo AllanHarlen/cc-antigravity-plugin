@@ -33,7 +33,7 @@
         "default_model": {
             "type": "string",
             "title": "Default AGY Model",
-            "description": "Model to use when --model is not specified. Default Gemini Flash medium is best for most tasks; use gemini-3.1-pro-low for harder reasoning, or pass Claude models explicitly with --model.",
+            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium.",
             "default": "gemini-3.5-flash-medium"
         },
         "timeout": {
