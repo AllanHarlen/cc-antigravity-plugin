@@ -112,8 +112,9 @@ Options:
                              Default: current working directory (added automatically).
   --files <glob,...>         File globs to ingest.
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
-  --model <name>             Model to use. Written to AGY's settings.json before spawn and restored after.
-                             AGY has no --model CLI flag; settings.json is the only headless mechanism.
+  --model <name>             Model to use. Written to AGY's ~/.gemini/antigravity-cli/settings.json before
+                             spawn and restored after. AGY has no --model CLI flag; settings.json is the
+                             only headless mechanism.
                              Available: gemini-3.5-flash-low, gemini-3.5-flash-medium (default),
                                         gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high,
                                         claude-4.6-sonnet-thinking, claude-4.6-opus-thinking,
@@ -740,21 +741,28 @@ export function resolveAutoModel(context) {
   return "gemini-3.5-flash-high";
 }
 
+// Maps bridge model identifiers to AGY settings.json display labels (confirmed from AGY transcripts).
+// AGY reads the "model" field in settings.json as a human-readable label, not an API identifier.
+const AGY_MODEL_LABELS = {
+  "gemini-3.5-flash-low":    "Gemini 3.5 Flash (Low)",
+  "gemini-3.5-flash-medium": "Gemini 3.5 Flash (Medium)",
+  "gemini-3.5-flash-high":   "Gemini 3.5 Flash (High)",
+  "gemini-3.1-pro-low":      "Gemini 3.1 Pro (Low)",
+  "gemini-3.1-pro-high":     "Gemini 3.1 Pro (High)",
+};
+
+// Converts a bridge model identifier to the display label AGY stores in settings.json.
+// Unknown models are passed through as-is (AGY falls back to its default).
+export function agyModelLabel(model) {
+  return AGY_MODEL_LABELS[model] ?? model;
+}
+
 // Returns the path where AGY CLI reads its settings.json.
-// AGY has no --model flag; writing the model here is the only headless override.
+// AGY stores its settings at ~/.gemini/antigravity-cli/settings.json on all platforms.
+// AGY has no --model flag; writing the model label here is the only headless override.
 export function resolveAgySettingsPath() {
-  if (process.platform === "win32") {
-    return path.join(
-      process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
-      "agy",
-      "settings.json",
-    );
-  }
-  return path.join(
-    process.env.XDG_CONFIG_HOME ?? path.join(process.env.HOME ?? "", ".config"),
-    "agy",
-    "settings.json",
-  );
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  return path.join(home, ".gemini", "antigravity-cli", "settings.json");
 }
 
 // Writes the requested model into AGY's settings.json and returns an async restore
@@ -768,9 +776,10 @@ export async function patchAgySettings(settingsPath, model) {
     // settings.json does not exist yet; we will create it and remove it on restore
   }
   const existing = originalContent ? JSON.parse(originalContent) : {};
+  const label = agyModelLabel(model);
   await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
-  await fsp.writeFile(settingsPath, JSON.stringify({ ...existing, model }, null, 2), "utf8");
-  logEvent("agy.model.patch", { settingsPath, model });
+  await fsp.writeFile(settingsPath, JSON.stringify({ ...existing, model: label }, null, 2), "utf8");
+  logEvent("agy.model.patch", { settingsPath, model, label });
 
   return async () => {
     try {

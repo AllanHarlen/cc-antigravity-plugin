@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  agyModelLabel,
   buildAntigravityArgs,
   buildAntigravityPrompt,
   checkAgyConnectivity,
@@ -625,23 +626,39 @@ test("collectContextFiles skips file with invalid UTF-8 encoding", async () => {
   assert.equal(context.skipped[0].reason, "encoding-error");
 });
 
+// ─── agyModelLabel ────────────────────────────────────────────────────────────
+
+test("agyModelLabel maps known bridge identifiers to AGY display labels", () => {
+  assert.equal(agyModelLabel("gemini-3.5-flash-low"),    "Gemini 3.5 Flash (Low)");
+  assert.equal(agyModelLabel("gemini-3.5-flash-medium"), "Gemini 3.5 Flash (Medium)");
+  assert.equal(agyModelLabel("gemini-3.5-flash-high"),   "Gemini 3.5 Flash (High)");
+  assert.equal(agyModelLabel("gemini-3.1-pro-low"),      "Gemini 3.1 Pro (Low)");
+  assert.equal(agyModelLabel("gemini-3.1-pro-high"),     "Gemini 3.1 Pro (High)");
+});
+
+test("agyModelLabel passes through unknown identifiers unchanged", () => {
+  assert.equal(agyModelLabel("claude-4.6-sonnet-thinking"), "claude-4.6-sonnet-thinking");
+  assert.equal(agyModelLabel("some-future-model"),          "some-future-model");
+});
+
 // ─── resolveAgySettingsPath ───────────────────────────────────────────────────
 
-test("resolveAgySettingsPath returns a string ending in settings.json", () => {
+test("resolveAgySettingsPath returns ~/.gemini/antigravity-cli/settings.json", () => {
   const p = resolveAgySettingsPath();
   assert.ok(typeof p === "string" && p.endsWith("settings.json"), `unexpected path: ${p}`);
+  assert.ok(p.includes(path.join(".gemini", "antigravity-cli")), `expected .gemini/antigravity-cli in path: ${p}`);
 });
 
 // ─── patchAgySettings ────────────────────────────────────────────────────────
 
-test("patchAgySettings writes model and restores original content", async () => {
+test("patchAgySettings writes display label and restores original content", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-patch-"));
   const settingsPath = path.join(tempDir, "settings.json");
 
   await fs.writeFile(settingsPath, JSON.stringify({ other: true }), "utf8");
   const restore = await patchAgySettings(settingsPath, "gemini-3.1-pro-low");
   const patched = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-  assert.equal(patched.model, "gemini-3.1-pro-low");
+  assert.equal(patched.model, agyModelLabel("gemini-3.1-pro-low"), "must write display label, not bridge identifier");
   assert.equal(patched.other, true, "existing fields must be preserved");
 
   await restore();
@@ -654,9 +671,9 @@ test("patchAgySettings creates settings.json when absent and removes it on resto
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-patch-new-"));
   const settingsPath = path.join(tempDir, "settings.json");
 
-  const restore = await patchAgySettings(settingsPath, "gemini-2.5-pro");
+  const restore = await patchAgySettings(settingsPath, "gemini-3.5-flash-high");
   const created = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-  assert.equal(created.model, "gemini-2.5-pro");
+  assert.equal(created.model, agyModelLabel("gemini-3.5-flash-high"));
 
   await restore();
   await assert.rejects(() => fs.readFile(settingsPath, "utf8"), "settings.json should be deleted on restore");
