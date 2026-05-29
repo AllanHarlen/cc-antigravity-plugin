@@ -78,6 +78,12 @@ Reinicie o Codex após clonar.
 
 # Continuar sessão anterior
 /cc-antigravity-plugin:antigravity --continue "Continue a partir do passo 3 da refatoração anterior"
+
+# Geração de imagem com Nano Banana
+/cc-antigravity-plugin:antigravity --generate-imagem "um skyline futurista ao pôr do sol, estilo cyberpunk, tons de roxo e laranja"
+
+# Com contexto de estilo e diretório de destino
+/cc-antigravity-plugin:antigravity --generate-imagem --files "brand/style.json" --output-dir ./assets "logotipo seguindo o guia de identidade visual"
 ```
 
 No Codex, use o agente via:
@@ -102,6 +108,8 @@ No Codex, use o agente via:
 | `--sandbox` | Ativa o modo sandbox do AGY |
 | `--max-files <n>` | Número máximo de arquivos injetados no contexto inline. Padrão: `40` |
 | `--max-file-bytes <n>` | Número máximo de bytes por arquivo. Padrão: `32768` |
+| `--generate-imagem`, `--generate-image` | Gera uma imagem a partir da descrição no task usando o modelo Nano Banana. Define `--model nano-banana` automaticamente. |
+| `--output-dir <path>` | Diretório onde as imagens geradas são salvas. Padrão: diretório atual. |
 | `--print-command` | Imprime o comando `agy` resolvido sem executar |
 
 **Padrões agênticos:** por padrão, `--dangerously-skip-permissions` é repassado e o cwd é adicionado ao workspace do AGY via `--add-dir`. Use `--read-only` para desativar.
@@ -118,6 +126,7 @@ No Codex, use o agente via:
 | `claude-4.6-sonnet-thinking` | Tarefas complexas com Claude |
 | `claude-4.6-opus-thinking` | Máxima capacidade |
 | `gpt-oss-120b-medium` | Alternativa GPT |
+| `nano-banana` | Geração de imagem (usado por `--generate-imagem`) |
 | `auto` | Seleciona automaticamente pelo tamanho do contexto inline |
 
 **`--model auto` — limiares:**

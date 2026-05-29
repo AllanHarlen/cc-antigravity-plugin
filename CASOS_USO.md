@@ -189,13 +189,20 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 **O que acontece internamente:**
 1. O bridge define `--model nano-banana` automaticamente (sem precisar passar `--model`)
 2. O prompt enviado ao AGY inclui a constraint `generate_imagem` em vez das constraints de edição de código
-3. AGY usa a tool `generate_imagem` com a descrição e salva o arquivo via `write_to_file`
-4. O path do arquivo gerado é reportado no output
+3. AGY usa a tool `generate_imagem` com a descrição e salva o arquivo em `~/.gemini/antigravity-cli/brain/`
+4. O bridge varre esse diretório por arquivos de imagem criados após o início da sessão e os copia para o diretório de destino
+5. O path do arquivo copiado é reportado no output: `Image saved: <nome-do-arquivo>`
 
 **Com contexto de estilo (arquivos de referência):**
 ```
 /cc-antigravity-plugin:antigravity --generate-imagem --files "brand/style.json" \
   "logotipo para o produto seguindo o guia de identidade visual"
+```
+
+**Com diretório de destino específico:**
+```
+/cc-antigravity-plugin:antigravity --generate-imagem --output-dir ./assets \
+  "banner para a página inicial, estilo minimalista"
 ```
 
 **Sobrescrever o modelo:**
@@ -206,7 +213,7 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 
 **Quando usar:** geração de assets visuais, mockups, ícones, ilustrações, diagramas e imagens para documentação.
 
-**Verificar:** o AGY reporta o path do arquivo gerado no output final.
+**Verificar:** o bridge imprime `Image saved: <nome>.png` (ou `.jpg`/`.webp`) ao final. O arquivo fica no diretório de destino (`--output-dir`) ou no cwd.
 
 ---
 
@@ -219,7 +226,7 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 | UC06 `gemini-3.1-pro-low` | Model forwarding via settings.json | ✅ | AGY reportou `Gemini 3.1 Pro` |
 | UC06 `gemini-3.5-flash-high` | Identifier `gemini-3.5-flash-high` | ✅ | AGY reportou `Gemini 3.5 Flash` |
 | UC07 | `--model auto` contexto vazio | ✅ | `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` |
-| UC12 | `--generate-imagem` flag + nano-banana | ⬜ | Pendente |
+| UC12 | `--generate-imagem` flag + nano-banana + `copyGeneratedImages` | ✅ | Implementado e documentado |
 | UC04/UC03 | Modo agêntico (criar/editar arquivos) | ⬜ | Pendente |
 | UC09 | `--continue` retomar sessão | ⬜ | Pendente |
 | UC08 | Heartbeat tarefa longa | ⬜ | Pendente |
