@@ -31,6 +31,8 @@ Após instalar, rode `agy` uma vez para fazer login e confirme que está funcion
 agy --print "what is 2+2"
 ```
 
+> O hook `SessionStart` verifica automaticamente se o AGY está instalado e acessível a cada início de sessão do Claude Code.
+
 ## Instalação
 
 ### Claude Code (recomendado)
@@ -71,7 +73,7 @@ Reinicie o Codex após clonar.
 # Modelo específico
 /cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low "Projete o schema do banco para o módulo X"
 
-# Modelo automático (selecionado pelo tamanho do contexto)
+# Modelo automático (selecionado pelo tamanho do contexto inline)
 /cc-antigravity-plugin:antigravity --model auto --dirs src "Refatore os controllers"
 
 # Continuar sessão anterior
@@ -83,6 +85,26 @@ No Codex, use o agente via:
 ```text
 @antigravity-agent <tarefa>
 ```
+
+## Opções
+
+| Opção | Descrição |
+|---|---|
+| `--dirs <path,...>` | Injeta diretórios recursivamente como contexto inline no prompt |
+| `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por vírgula |
+| `--add-dir <path>` | Adiciona diretório ao workspace nativo do AGY via `--add-dir`; repetível |
+| `--model <name>` | Modelo a usar; escrito em `settings.json` antes do spawn e restaurado após. Ver tabela abaixo. |
+| `--read-only` | Desativa `--dangerously-skip-permissions` e o auto-add do cwd. Use para análise pura sem modificar arquivos. |
+| `--continue`, `-c` | Continua a conversa mais recente do AGY |
+| `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
+| `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
+| `--interactive`, `--agent` | Usa `--prompt-interactive` para sessão interativa (requer TTY) |
+| `--sandbox` | Ativa o modo sandbox do AGY |
+| `--max-files <n>` | Número máximo de arquivos injetados no contexto inline. Padrão: `40` |
+| `--max-file-bytes <n>` | Número máximo de bytes por arquivo. Padrão: `32768` |
+| `--print-command` | Imprime o comando `agy` resolvido sem executar |
+
+**Padrões agênticos:** por padrão, `--dangerously-skip-permissions` é repassado e o cwd é adicionado ao workspace do AGY via `--add-dir`. Use `--read-only` para desativar.
 
 ## Modelos disponíveis
 
@@ -96,7 +118,17 @@ No Codex, use o agente via:
 | `claude-4.6-sonnet-thinking` | Tarefas complexas com Claude |
 | `claude-4.6-opus-thinking` | Máxima capacidade |
 | `gpt-oss-120b-medium` | Alternativa GPT |
-| `auto` | Seleciona flash tier pelo tamanho do contexto |
+| `auto` | Seleciona automaticamente pelo tamanho do contexto inline |
+
+**`--model auto` — limiares:**
+
+| Contexto inline total | Modelo selecionado |
+|---|---|
+| < 32 KB | `gemini-3.5-flash-low` |
+| 32 KB – 256 KB | `gemini-3.5-flash-medium` |
+| ≥ 256 KB | `gemini-3.5-flash-high` |
+
+O modelo é aplicado escrevendo `settings.json` do AGY antes do spawn e restaurado imediatamente após — sem efeito persistente no AGY.
 
 ## Códigos de saída
 
@@ -106,6 +138,8 @@ O bridge emite um JSON estruturado para orquestradores reagirem a falhas:
 {"status":"QUOTA_EXAUSTED","reason":"...","model":"gemini-3.5-flash-medium","retry":"--continue"}
 ```
 
+O campo `retry` indica como retomar: passe `--continue` na próxima chamada para retomar a sessão interrompida.
+
 | Código | Significado | Ação |
 |---|---|---|
 | `0` | Sucesso | — |
@@ -114,6 +148,8 @@ O bridge emite um JSON estruturado para orquestradores reagirem a falhas:
 | `11` | `AUTH_REQUIRED` | Execute `agy` uma vez interativamente |
 | `12` | `TIMEOUT` | Aumente `--timeout` ou reduza o escopo |
 | `13` | `AGY_MISSING` | Instale o AGY |
+
+> **Heartbeat:** o timer de timeout reseta a cada chunk de output do AGY. Tarefas longas que produzem output contínuo não são canceladas — o timeout só dispara se o AGY ficar completamente silencioso por `timeoutMs`.
 
 ## Testes
 
@@ -128,6 +164,8 @@ npm test
 
 Cobertura: parse de argumentos · coleta de contexto · geração de prompt · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
 
+Para testes manuais de runtime contra o AGY real, consulte [`MANUAL_TESTS.md`](MANUAL_TESTS.md) — 12 casos de teste cobrindo conectividade, mode forwarding, criação de arquivos, `--read-only`, `--model auto`, heartbeat e `--continue`.
+
 ## Desenvolvimento
 
 ### Variáveis de ambiente
@@ -137,7 +175,7 @@ Cobertura: parse de argumentos · coleta de contexto · geração de prompt · s
 | `CC_ANTIGRAVITY_LOG_PATH` | Caminho customizado para o arquivo de log JSONL |
 | `CC_ANTIGRAVITY_LOG_OUTPUT` | Defina como `1` para incluir o output do AGY nos logs |
 
-Log padrão: `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (Windows) ou `~/.local/share/agy/cc-plugin-logs/` (Linux).
+Log padrão: `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (Windows) ou `~/.local/share/agy/cc-plugin-logs/` (Linux/macOS).
 
 ### Teste local com logs em tempo real (Windows)
 
@@ -153,10 +191,11 @@ O script define `CC_ANTIGRAVITY_LOG_PATH` para a sessão e abre uma segunda jane
 |---|---|
 | Erro de autenticação | Rode `agy` interativamente e faça login. |
 | `agy` não encontrado | Rode o instalador do AGY e confirme que o binário está no PATH. |
-| Seleção de modelo ignorada | Verifique se `%LOCALAPPDATA%\agy\settings.json` foi criado e removido após a execução. |
+| Modelo não muda | Verifique se `%LOCALAPPDATA%\agy\settings.json` (Win) ou `~/.config/agy/settings.json` (Linux) é lido pelo AGY. Confirme com T02 do `MANUAL_TESTS.md`. |
 | Pressão de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
-| Timeout prematuro | Aumente `--timeout`, reduza o contexto ou divida a tarefa em etapas. |
+| Timeout prematuro | Aumente `--timeout`. Com heartbeat ativo, o timer reseta a cada output — verifique se o AGY está produzindo output. |
 | Plugin não carregado | Rode `/reload-plugins` ou reinicie o Claude Code. |
+| Arquivo com encoding errado ignorado | Arquivos não-UTF-8 (ex: Windows-1252) são pulados com `encoding-error`. Re-salve em UTF-8. |
 
 ## Licença
 
