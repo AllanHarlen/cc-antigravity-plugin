@@ -2,7 +2,7 @@
 
 Plugin para Claude Code e Codex que integra o [Antigravity CLI (AGY)](https://antigravity.google) como assistente de codificação agêntico — cria, edita, pesquisa arquivos e executa comandos autonomamente usando os modelos Gemini, Claude e GPT do AGY diretamente no seu workspace.
 
-## O que é
+## Visão Geral
 
 O AGY é um terminal CLI do Google com janela de contexto longa (2M tokens). Este plugin conecta o AGY ao Claude Code e ao Codex por meio de um bridge Node.js compartilhado, expondo o AGY como um subagente que **completa tarefas de codificação de ponta a ponta**.
 
