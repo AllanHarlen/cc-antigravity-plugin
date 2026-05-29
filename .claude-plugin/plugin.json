@@ -23,7 +23,7 @@
         "codex",
         "claude-code"
     ],
-    "skills": "./",
+    "skills": "./skills",
     "commands": [
         "./commands/antigravity.md"
     ],
