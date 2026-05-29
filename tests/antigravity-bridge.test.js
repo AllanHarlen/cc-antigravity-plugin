@@ -14,6 +14,7 @@ import {
   patchAgySettings,
   resolveAgyExe,
   resolveAgySettingsPath,
+  resolveAutoModel,
   spawnViaConPty,
   stripAnsi,
   EXIT_QUOTA_EXAUSTED,
@@ -465,6 +466,33 @@ test("resolveAgyExe returns the first discovered agy executable", () => {
   assert.equal(resolveAgyExe(fakeSpawn), "/usr/bin/agy");
 });
 
+// ─── resolveAutoModel ────────────────────────────────────────────────────────
+
+test("resolveAutoModel returns flash-low for small context", () => {
+  const ctx = { included: [{ bytes: 10_000 }], skipped: [] };
+  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-low");
+});
+
+test("resolveAutoModel returns flash-medium for typical context", () => {
+  const ctx = { included: [{ bytes: 100_000 }], skipped: [] };
+  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-medium");
+});
+
+test("resolveAutoModel returns flash-high for large context", () => {
+  const ctx = { included: [{ bytes: 300_000 }], skipped: [] };
+  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-high");
+});
+
+test("resolveAutoModel sums bytes across multiple included files", () => {
+  const ctx = { included: [{ bytes: 100_000 }, { bytes: 200_000 }], skipped: [] };
+  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-high");
+});
+
+test("resolveAutoModel returns flash-low for empty context", () => {
+  const ctx = { included: [], skipped: [] };
+  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-low");
+});
+
 test("spawnViaConPty streams chunks incrementally", async () => {
   const writes = [];
   const pty = {
@@ -632,6 +660,41 @@ test("patchAgySettings creates settings.json when absent and removes it on resto
 
   await restore();
   await assert.rejects(() => fs.readFile(settingsPath, "utf8"), "settings.json should be deleted on restore");
+});
+
+test("spawnViaConPty heartbeat: timeout resets on each output chunk", async () => {
+  // 5 chunks at 20ms intervals = 100ms total run; silence between chunks = 20ms.
+  // Timeout = 50ms. Without heartbeat the timer fires at ~50ms (chunk 2).
+  // With heartbeat, each chunk resets the 50ms window — all 5 chunks should arrive.
+  let chunkCount = 0;
+  const pty = {
+    spawn: () => {
+      const dataHandlers = [];
+      const exitHandlers = [];
+      const term = {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: (fn) => exitHandlers.push(fn),
+        kill: () => {},
+      };
+      const emit = () => {
+        chunkCount += 1;
+        dataHandlers.forEach((fn) => fn(`chunk${chunkCount}`));
+        if (chunkCount < 5) {
+          setTimeout(emit, 20);
+        } else {
+          setTimeout(() => exitHandlers.forEach((fn) => fn({ exitCode: 0 })), 20);
+        }
+      };
+      setTimeout(emit, 20);
+      return term;
+    },
+  };
+  const chunks = [];
+  const exitCode = await spawnViaConPty("agy", ["--print", "x"], pty, 50, {
+    write: (chunk) => { chunks.push(String(chunk)); return true; },
+  });
+  assert.equal(exitCode, 0);
+  assert.ok(chunks.some((c) => c.includes("chunk5")), "all 5 chunks must arrive before timeout");
 });
 
 test("spawnViaConPty populates outputAccumulator when provided", async () => {

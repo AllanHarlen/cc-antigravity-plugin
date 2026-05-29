@@ -251,7 +251,7 @@ test("main error output includes plugin log path", async () => {
 
 // ─── QUOTA_EXAUSTED detection via PTY output ──────────────────────────────────
 
-test("main ConPTY: quota output returns EXIT_QUOTA_EXAUSTED and emits JSON signal", async () => {
+test("main ConPTY: quota output returns EXIT_QUOTA_EXAUSTED and emits JSON signal with retry hint", async () => {
   const io = makeStreams();
   const result = await main(["analyze this"], {
     ...io,
@@ -260,8 +260,8 @@ test("main ConPTY: quota output returns EXIT_QUOTA_EXAUSTED and emits JSON signa
     _conPtyTimeoutMs: 5_000,
   });
   assert.equal(result, EXIT_QUOTA_EXAUSTED);
-  // stdout should contain the structured JSON signal
   assert.match(io.stdout, /QUOTA_EXAUSTED/);
+  assert.match(io.stdout, /--continue/, "retry hint must be present in signal");
 });
 
 test("main ConPTY: auth output returns EXIT_AUTH_REQUIRED and emits JSON signal", async () => {

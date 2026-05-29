@@ -4,12 +4,22 @@
 
 # OS files
 .DS_Store
+Thumbs.db
 
 # Editor files
 *.swp
 *.swo
 *~
-node_modules/
+.vscode/
+.idea/
 
-# Development docs
-docs/
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Development artifacts
+openspec/
+.antigravitycli/
+.playwright-mcp/
+relatorio_*.md
+dog_nano_banana.png

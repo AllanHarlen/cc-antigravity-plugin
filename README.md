@@ -1,17 +1,21 @@
 # cc-antigravity-plugin
 
-Leve para o Claude Code e para o Codex uma passagem de contexto longo pelo
-Antigravity CLI (AGY), ideal para revisao de arquitetura, analise de impacto de
-refatoracao, sintese de documentacao e analise de dados textuais mistos.
+Plugin para Claude Code e Codex que integra o [Antigravity CLI (AGY)](https://antigravity.google) como assistente de codificação agêntico — cria, edita, pesquisa arquivos e executa comandos autonomamente usando os modelos Gemini, Claude e GPT do AGY diretamente no seu workspace.
 
-O Claude Code e excelente para edicoes locais e precisas. O AGY ajuda quando
-uma fatia ampla do repositorio precisa ser lida e sintetizada em uma unica
-passagem. Este plugin conecta os dois por meio de um bridge Node.js
-compartilhado.
+## O que é
 
-## Pre-requisitos
+O AGY é um terminal CLI do Google com janela de contexto longa (2M tokens). Este plugin conecta o AGY ao Claude Code e ao Codex por meio de um bridge Node.js compartilhado, expondo o AGY como um subagente que **completa tarefas de codificação de ponta a ponta**.
 
-Instale e autentique o AGY:
+**Quando usar em vez do Claude Code nativo:**
+- Refatorações multi-arquivo que precisam de contexto amplo do repositório
+- Geração de código que atravessa várias camadas do projeto
+- Análise de arquitetura e impacto de mudanças com contexto completo
+- Tarefas que se beneficiam dos modelos Gemini Pro de raciocínio profundo
+
+## Pré-requisitos
+
+- **Node.js 18+**
+- **Antigravity CLI** instalado e autenticado
 
 ```bash
 # macOS / Linux
@@ -20,185 +24,92 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 # Windows PowerShell
 irm https://antigravity.google/cli/install.ps1 | iex
 
+# Autenticar (necessário uma vez)
 agy
-agy --print "what is 2+2"
 ```
 
-## Instalacao
+## Instalação
 
 ### Claude Code
 
 ```bash
 /plugin marketplace add AllanHarlen/cc-antigravity-plugin
-/plugin install cc-antigravity-plugin@cc-antigravity-plugin
 /reload-plugins
 ```
 
 ### Codex
 
 ```bash
-mkdir -p ~/.agents/skills
 git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
   ~/.agents/skills/cc-antigravity-plugin
 ```
 
-Reinicie o Codex depois de clonar.
-
 ## Uso
 
 ```bash
-/cc-antigravity-plugin:antigravity <tarefa>
-/cc-antigravity-plugin:antigravity --dirs src,docs <tarefa>
-/cc-antigravity-plugin:antigravity --files "schemas/**/*.json,data/**/*.csv" <tarefa>
-/cc-antigravity-plugin:antigravity --add-dir src <tarefa>
+# Tarefa agêntica — padrão, cria e edita arquivos no workspace
+/cc-antigravity-plugin:antigravity "Refatore o módulo auth para async/await e atualize todos os callers"
+
+# Com contexto inline de diretórios
+/cc-antigravity-plugin:antigravity --dirs src,docs "Explique a arquitetura e cite os arquivos-chave"
+
+# Somente análise, sem modificar arquivos
+/cc-antigravity-plugin:antigravity --read-only --dirs src "Analise o impacto de remover o módulo de cache"
+
+# Modelo específico
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low "Projete o schema do banco para o módulo X"
+
+# Modelo automático (selecionado pelo tamanho do contexto)
+/cc-antigravity-plugin:antigravity --model auto --dirs src "Refatore os controllers"
+
+# Continuar sessão anterior
+/cc-antigravity-plugin:antigravity --continue "Continue a partir do passo 3 da refatoração anterior"
 ```
 
-No Codex, use a skill raiz com:
+## Modelos disponíveis
 
-```text
-$antigravity-integration
+| Identificador | Indicado para |
+|---|---|
+| `gemini-3.5-flash-medium` | **Padrão** — maioria das tarefas |
+| `gemini-3.5-flash-low` | Tarefas simples, resposta mais rápida |
+| `gemini-3.5-flash-high` | Flash com mais esforço de raciocínio |
+| `gemini-3.1-pro-low` | Raciocínio mais profundo |
+| `gemini-3.1-pro-high` | Raciocínio máximo |
+| `claude-4.6-sonnet-thinking` | Tarefas complexas com Claude |
+| `claude-4.6-opus-thinking` | Máxima capacidade |
+| `gpt-oss-120b-medium` | Alternativa GPT |
+| `auto` | Seleciona flash tier pelo tamanho do contexto |
+
+## Códigos de saída
+
+O bridge emite um JSON estruturado para orquestradores reagirem a falhas:
+
+```json
+{"status":"QUOTA_EXAUSTED","reason":"...","model":"gemini-3.5-flash-medium","retry":"--continue"}
 ```
 
-## Opcoes
+| Código | Significado | Ação |
+|---|---|---|
+| `0` | Sucesso | — |
+| `1` | Erro genérico | Verifique o log |
+| `10` | `QUOTA_EXAUSTED` | Aguarde reset; use `--continue` para retomar |
+| `11` | `AUTH_REQUIRED` | Execute `agy` uma vez interativamente |
+| `12` | `TIMEOUT` | Aumente `--timeout` ou reduza o escopo |
+| `13` | `AGY_MISSING` | Instale o AGY |
 
-| Opcao | Descricao |
-|-------|-----------|
-| `--dirs <path,...>` | Injeta diretorios recursivamente no prompt do bridge |
-| `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por virgula |
-| `--add-dir <path>` | Repassa o `--add-dir` nativo do AGY; pode ser repetido |
-| `--model <name>` | Seleciona o modelo do AGY via `agy -i "/model ..."` antes da execucao |
-| `--continue`, `-c` | Continua a conversa mais recente do AGY |
-| `--conversation <id>` | Retoma uma conversa especifica do AGY |
-| `--timeout <duration>` | Repassa `--print-timeout` ao AGY, por exemplo `3m` |
-| `--agent`, `--interactive` | Usa `--prompt-interactive` para abrir uma sessao AGY agente |
-| `--sandbox` | Ativa o modo sandbox do AGY |
-| `--skip-permissions` | Repassa `--dangerously-skip-permissions` ao AGY |
-| `--max-files <n>` | Numero maximo de arquivos injetados, padrao `40` |
-| `--max-file-bytes <n>` | Numero maximo de bytes por arquivo injetado, padrao `32768` |
-| `--print-command` | Imprime o comando `agy` resolvido sem executar |
-
-`--format json` nao e suportado porque o modo headless `--print` do AGY retorna
-texto.
-
-Modelos recomendados:
-
-| Modelo | Uso |
-|--------|-----|
-| `gemini-3.5-flash-medium` | Padrao quando `--model` nao e informado; maioria das atividades |
-| `gemini-3.5-flash-high` | Flash com mais esforco para tarefas um pouco mais exigentes |
-| `gemini-3.1-pro-low` | Atividades de maior raciocinio |
-| `claude-4.6-sonnet-thinking` | Somente quando passado explicitamente com `--model` |
-| `claude-4.6-opus-thinking` | Somente quando passado explicitamente com `--model` |
-
-## Exemplos
-
-```bash
-/cc-antigravity-plugin:antigravity --dirs src,docs \
-  "Explique a arquitetura. Cite arquivos-chave e fluxos de dados."
-```
-
-```bash
-/cc-antigravity-plugin:antigravity --add-dir src --model gemini-3.1-pro-low \
-  "Analise o impacto de refatorar o modulo de auth."
-```
-
-```bash
-/cc-antigravity-plugin:antigravity --continue --timeout 5m \
-  "Resuma o plano de migracao da resposta anterior."
-```
-
-```bash
-/cc-antigravity-plugin:antigravity --agent --add-dir . --skip-permissions \
-  "Atue como agente no workspace e crie relatorio-impostos.html com um relatorio HTML sobre impostos no Brasil."
-```
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src --print-command -- "analisar auth"
-```
-
-## Como Funciona
-
-O bridge compartilhado em `scripts/antigravity-bridge.js`:
-
-1. Faz o parse das flags do bridge.
-2. Resolve `--dirs` e `--files` sem depender de APIs de glob exclusivas do Node 22.
-3. Filtra caminhos ignorados e arquivos binarios.
-4. Monta um prompt estruturado com inventario, payloads inline, tarefa e restricoes.
-5. Mapeia flags nativas do AGY como `--add-dir`, `--continue`, `--conversation`,
-   `--prompt-interactive`, `--sandbox`, `--dangerously-skip-permissions` e
-   `--print-timeout`.
-6. Seleciona o modelo com `agy -i "/model <modelo>"`; se nada for informado, usa `gemini-3.5-flash-medium`.
-7. Executa o AGY via `node-pty` quando disponivel e faz streaming do output conforme
-   ele chega, com fallback para `spawnSync`.
-
-## Estrutura do Repositorio
-
-```text
-cc-antigravity-plugin/
-|-- .claude-plugin/
-|   |-- marketplace.json
-|   `-- plugin.json
-|-- agents/
-|   `-- antigravity-agent.md
-|-- bin/
-|   `-- antigravity-bridge
-|-- commands/
-|   `-- antigravity.md
-|-- hooks/
-|   `-- hooks.json
-|-- scripts/
-|   |-- antigravity-bridge.js
-|   `-- check-agy.js
-|-- tests/
-|   |-- antigravity-bridge.test.js
-|   `-- antigravity-main.test.js
-|-- SKILL.md
-|-- LICENSE
-`-- package.json
-```
-
-## Desenvolvimento
+## Testes
 
 ```bash
 npm test
 ```
 
-### Teste controlado com logs
-
-Para abrir o Claude Code com o plugin instrumentado e acompanhar o log do bridge
-em tempo real:
-
-```powershell
-.\scripts\run-claude-plugin-dev.ps1
+```
+ℹ pass 81
+ℹ fail 0
 ```
 
-O script cria um arquivo em `.antigravitycli/logs/*.jsonl`, define
-`CC_ANTIGRAVITY_LOG_PATH` para a sessao e abre uma segunda janela fazendo
-`Get-Content -Wait` nesse log.
+Cobertura: parse de argumentos · coleta de contexto · geração de prompt · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
 
-Dentro do Claude Code, rode um ciclo pequeno:
+## Licença
 
-```text
-/plugin marketplace add ./
-/plugin install cc-antigravity-plugin@cc-antigravity-plugin
-/reload-plugins
-/cc-antigravity-plugin:antigravity --files package.json --timeout 2m responda apenas plugin-log-ok
-```
-
-O log registra eventos como parse de argumentos, arquivos coletados, flags
-repassadas ao AGY, selecao de modelo, inicio/fim da execucao e
-erros. O prompt completo nao e gravado; o log mostra apenas o tamanho dele.
-
-## Solucao de Problemas
-
-| Problema | Solucao |
-|----------|---------|
-| Erro de autenticacao | Rode `agy` interativamente e faca login. |
-| `agy` nao encontrado | Rode o instalador do AGY novamente e confirme que o binario esta no PATH. |
-| Selecao de modelo falhou | Rode `agy` interativamente e confirme que `/model <nome>` aceita o modelo solicitado. |
-| Pressao de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
-| Timeout | Aumente `--timeout`, reduza o contexto ou deixe a tarefa mais direta. |
-
-## Licenca
-
-MIT
+[MIT](LICENSE)

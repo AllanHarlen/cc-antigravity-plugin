@@ -117,7 +117,7 @@ Options:
                              Available: gemini-3.5-flash-low, gemini-3.5-flash-medium (default),
                                         gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high,
                                         claude-4.6-sonnet-thinking, claude-4.6-opus-thinking,
-                                        gpt-oss-120b-medium
+                                        gpt-oss-120b-medium, auto (selects flash tier by context size)
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
@@ -273,8 +273,11 @@ export function classifyAgyOutput(output) {
 }
 
 // Emits a single machine-readable JSON line that orchestrators / Claude Code can parse.
+// QUOTA_EXAUSTED includes retry:"--continue" so callers know how to resume the session.
 function emitStructuredSignal(type, reason, model, _stdout) {
-  _stdout.write(JSON.stringify({ status: type, reason, model }) + "\n");
+  const signal = { status: type, reason, model };
+  if (type === "QUOTA_EXAUSTED") signal.retry = "--continue";
+  _stdout.write(JSON.stringify(signal) + "\n");
 }
 
 export function parseCliArgs(argv) {
@@ -728,6 +731,15 @@ function buildAgyMissingError() {
   return err;
 }
 
+// Selects a model based on total inline context size when --model auto is requested.
+// Larger context → higher Flash tier (more capable, not just faster).
+export function resolveAutoModel(context) {
+  const totalBytes = context.included.reduce((sum, f) => sum + f.bytes, 0);
+  if (totalBytes < 32_768) return "gemini-3.5-flash-low";
+  if (totalBytes < 262_144) return "gemini-3.5-flash-medium";
+  return "gemini-3.5-flash-high";
+}
+
 // Returns the path where AGY CLI reads its settings.json.
 // AGY has no --model flag; writing the model here is the only headless override.
 export function resolveAgySettingsPath() {
@@ -839,7 +851,9 @@ export async function spawnViaConPty(
       return;
     }
 
-    const timer = setTimeout(() => {
+    // Heartbeat: the timer resets on every output chunk. It only fires if AGY goes
+    // completely silent for timeoutMs — i.e. stalls, not just runs slowly.
+    const timeoutFn = () => {
       try { term.kill(); } catch { /* already dead */ }
       logEvent("agy.conpty.timeout", { timeoutMs });
       const timeoutErr = new Error(
@@ -848,11 +862,14 @@ export async function spawnViaConPty(
       );
       timeoutErr.code = "ETIMEDOUT";
       reject(timeoutErr);
-    }, timeoutMs);
+    };
+    let timer = setTimeout(timeoutFn, timeoutMs);
 
     term.onData((data) => {
       const clean = stripAnsi(data);
       if (clean) {
+        clearTimeout(timer);
+        timer = setTimeout(timeoutFn, timeoutMs);
         wroteOutput = true;
         lastOutput = clean;
         if (outputAccumulator !== null) outputAccumulator.push(clean);
@@ -905,11 +922,8 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
-    const model = parsed.model ?? defaultModel;
-    logEvent("bridge.model.resolved", {
-      model,
-      source: parsed.model ? "flag" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"),
-    });
+    let model = parsed.model ?? defaultModel;
+    const modelSource = parsed.model ? "flag" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default");
 
     // In agentic mode, automatically add cwd to the AGY workspace when the caller
     // did not specify any --add-dir. This gives AGY access to the project by default.
@@ -925,6 +939,15 @@ export async function main(argv = process.argv.slice(2), {
       maxFileBytes: parsed.maxFileBytes,
     });
     logEvent("bridge.context.collected", summarizeContext(context));
+
+    // Resolve --model auto after context is collected so we know the actual size.
+    if (model === "auto") {
+      const contextBytes = context.included.reduce((s, f) => s + f.bytes, 0);
+      model = resolveAutoModel(context);
+      logEvent("bridge.model.resolved", { model, source: "auto", contextBytes });
+    } else {
+      logEvent("bridge.model.resolved", { model, source: modelSource });
+    }
     const prompt = buildAntigravityPrompt({ task: parsed.task, context });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
