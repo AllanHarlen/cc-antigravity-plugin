@@ -396,6 +396,7 @@ export function parseCliArgs(argv) {
         parsed.printCommand = true;
         break;
       case "--generate-imagem":
+      case "--generate-image":
         parsed.generateImagem = true;
         break;
       default:
@@ -972,6 +973,50 @@ function printResolvedCommands(agyArgs, _stdout = process.stdout) {
   _stdout.write(renderAgyCommand(agyArgs) + "\n");
 }
 
+async function findFilesNewerThan(dir, sinceMs, extensions) {
+  const results = [];
+  let entries;
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...(await findFilesNewerThan(fullPath, sinceMs, extensions)));
+    } else if (entry.isFile() && extensions.has(path.extname(entry.name).toLowerCase())) {
+      try {
+        const stat = await fsp.stat(fullPath);
+        if (stat.mtimeMs >= sinceMs) results.push(fullPath);
+      } catch { /* skip */ }
+    }
+  }
+  return results;
+}
+
+async function copyGeneratedImages(sinceMs, destDir, _stdout = process.stdout) {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  const brainBase = path.join(home, ".gemini", "antigravity-cli", "brain");
+  const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+  let images;
+  try {
+    images = await findFilesNewerThan(brainBase, sinceMs, imageExtensions);
+  } catch {
+    return;
+  }
+  for (const src of images) {
+    const dest = path.join(destDir, path.basename(src));
+    try {
+      await fsp.copyFile(src, dest);
+      _stdout.write(`\nImage saved: ${path.basename(dest)}\n`);
+      logEvent("bridge.image.copied", { src, dest });
+    } catch (err) {
+      logEvent("bridge.image.copy.error", { src, dest, message: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
 export async function main(argv = process.argv.slice(2), {
   _spawnSync = spawnSync,
   _loadNodePty = loadNodePty,
@@ -1054,6 +1099,7 @@ export async function main(argv = process.argv.slice(2), {
       ? await patchAgySettings(resolveAgySettingsPath(), model)
       : null;
 
+    const spawnStartMs = Date.now();
     try {
       const ptyModule = _loadNodePty();
 
@@ -1097,8 +1143,10 @@ export async function main(argv = process.argv.slice(2), {
         if (sig) {
           emitStructuredSignal(sig.type, sig.reason, model, _stdout);
           logEvent("bridge.classified", { type: sig.type, reason: sig.reason, model, exitCode: sig.exitCode });
+          if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, process.cwd(), _stdout);
           return sig.exitCode;
         }
+        if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, process.cwd(), _stdout);
         return ptyExitCode;
       }
 
@@ -1116,6 +1164,7 @@ export async function main(argv = process.argv.slice(2), {
         throw result.error;
       }
       logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
+      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, process.cwd(), _stdout);
       return result.status ?? EXIT_ERROR;
     } finally {
       await restoreAgySettings?.();
