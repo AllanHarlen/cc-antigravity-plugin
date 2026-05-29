@@ -303,6 +303,7 @@ export function parseCliArgs(argv) {
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     printCommand: false,
     generateImagem: false,
+    outputDir: undefined,
     task: "",
     help: false,
   };
@@ -398,6 +399,10 @@ export function parseCliArgs(argv) {
       case "--generate-imagem":
       case "--generate-image":
         parsed.generateImagem = true;
+        break;
+      case "--output-dir":
+        parsed.outputDir = takeOptionValue(argv, index, token);
+        index += 1;
         break;
       default:
         taskTokens.push(token);
@@ -1005,6 +1010,9 @@ async function copyGeneratedImages(sinceMs, destDir, _stdout = process.stdout) {
   } catch {
     return;
   }
+  if (images.length > 0) {
+    await fsp.mkdir(destDir, { recursive: true });
+  }
   for (const src of images) {
     const dest = path.join(destDir, path.basename(src));
     try {
@@ -1066,8 +1074,9 @@ export async function main(argv = process.argv.slice(2), {
     } else {
       logEvent("bridge.model.resolved", { model, source: modelSource });
     }
+    const imageOutputDir = parsed.outputDir ? path.resolve(parsed.outputDir) : process.cwd();
     const prompt = parsed.generateImagem
-      ? buildImagePrompt({ task: parsed.task, context, outputDir: process.cwd() })
+      ? buildImagePrompt({ task: parsed.task, context, outputDir: imageOutputDir })
       : buildAntigravityPrompt({ task: parsed.task, context });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
@@ -1143,10 +1152,10 @@ export async function main(argv = process.argv.slice(2), {
         if (sig) {
           emitStructuredSignal(sig.type, sig.reason, model, _stdout);
           logEvent("bridge.classified", { type: sig.type, reason: sig.reason, model, exitCode: sig.exitCode });
-          if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, process.cwd(), _stdout);
+          if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
           return sig.exitCode;
         }
-        if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, process.cwd(), _stdout);
+        if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
         return ptyExitCode;
       }
 
@@ -1164,7 +1173,7 @@ export async function main(argv = process.argv.slice(2), {
         throw result.error;
       }
       logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
-      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, process.cwd(), _stdout);
+      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
       return result.status ?? EXIT_ERROR;
     } finally {
       await restoreAgySettings?.();
