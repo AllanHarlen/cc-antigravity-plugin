@@ -1,48 +1,52 @@
 ---
 name: antigravity-integration
-description: Use Antigravity CLI (AGY) for long-context codebase exploration, architecture review, refactor impact analysis, documentation synthesis, or structured data analysis when the host should hand off a large cross-file problem instead of solving it file-by-file.
+description: Use Antigravity CLI (AGY) as an agentic coding assistant for tasks that require creating, editing, or searching files across the codebase — or for large-context analysis that benefits from synthesizing many files in one pass.
 allowed-tools: Bash, Glob, Read
 ---
 
 # Antigravity CLI Integration
 
-Antigravity CLI (AGY) is the large-context handoff in this repository. Use it
-when the task is about the shape of a system, a broad slice of a repo, or a
-mixed text dataset that should be synthesized in one pass.
+Antigravity CLI (AGY) runs as an agentic assistant that can create, edit, delete,
+and search files using its native tools. Use it when the task spans multiple files,
+requires deep codebase understanding, or needs actual file modifications.
 
 ## When to Use Antigravity
 
-| Scenario | Why Antigravity Fits |
-|----------|----------------------|
-| Whole-codebase architecture | Broad cross-file synthesis |
-| Cross-file security review | Traces flows across modules |
-| Refactor impact analysis | Finds dependencies and callers |
-| Codebase orientation | Produces a high-level map quickly |
-| Documentation generation | Synthesizes behavior from many files |
-| Structured data review | Reads JSON, YAML, TOML, CSV, Markdown, and code together |
+| Scenario | Mode |
+|----------|------|
+| Multi-file refactor or code generation | Agentic (default) |
+| Create new files or reports | Agentic (default) |
+| Whole-codebase architecture review | Read-only (`--read-only`) |
+| Cross-file security audit | Read-only (`--read-only`) |
+| Refactor impact analysis | Read-only (`--read-only`) |
+| Documentation generation | Agentic or read-only |
+| Structured data analysis | Read-only (`--read-only`) |
 
-Avoid Antigravity for quick single-file edits, tight interactive debugging, or
-narrow tasks with no cross-file context.
+## Default Behavior
+
+By default, the bridge is **agentic**: `--dangerously-skip-permissions` is forwarded
+and the current working directory is added to the AGY workspace. AGY will use its
+native tools to complete the task without requiring permission confirmations.
+
+Pass `--read-only` to disable this for tasks that must not modify files.
 
 ## Host Entry Points
 
 ### Claude Code
 
-Use the slash command:
-
 ```bash
 /cc-antigravity-plugin:antigravity <task>
 /cc-antigravity-plugin:antigravity --dirs src,docs <task>
 /cc-antigravity-plugin:antigravity --files "schemas/**/*.json" <task>
+/cc-antigravity-plugin:antigravity --read-only --dirs src <task>
 ```
 
-Claude can also spawn `antigravity-agent` when the task benefits from a
-large-context pass.
+Claude can also spawn `antigravity-agent` when the task benefits from AGY.
 
 ### Codex
 
 - Mention the skill explicitly with `$antigravity-integration`.
-- Or ask Codex to use the Antigravity integration for a large analysis task.
+- Or ask Codex to use the Antigravity integration for a coding or analysis task.
 
 ## Shared Runtime Contract
 
@@ -52,8 +56,8 @@ Always prefer the shared bridge script over hand-written `agy` commands:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] -- "<task>"
 ```
 
-The bridge owns argument parsing, file ingestion, prompt assembly, AGY model
-selection through `agy -i "/model ..."`, conversation flags, and AGY invocation.
+The bridge owns argument parsing, defaults (skip-permissions, workspace auto-add),
+file ingestion, prompt assembly, QUOTA_EXAUSTED detection, and AGY invocation.
 
 ## Bridge Options
 
@@ -62,50 +66,59 @@ selection through `agy -i "/model ..."`, conversation flags, and AGY invocation.
 | `--dirs <path,...>` | Inline directories into the bridge prompt |
 | `--files <glob,...>` | Inline targeted globs and mixed data formats |
 | `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
-| `--model <name>` | Select the AGY model via `agy -i "/model ..."` before execution |
+| `--model <name>` | Requested model (parsed, not forwarded — AGY has no `--model` CLI flag) |
+| `--read-only` | Disable skip-permissions and workspace auto-add |
 | `--continue`, `-c` | Continue the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation |
-| `--timeout <duration>` | Forward `--print-timeout` to AGY |
-| `--agent`, `--interactive` | Use AGY `--prompt-interactive` for an agent-style workspace session |
+| `--timeout <duration>` | Forward `--print-timeout` to AGY (default: 10m) |
+| `--interactive` | Use AGY `--prompt-interactive` for human-at-terminal sessions |
 | `--sandbox` | Enable AGY sandbox mode |
-| `--skip-permissions` | Forward AGY `--dangerously-skip-permissions` |
 | `--print-command` | Inspect the resolved AGY command without running it |
 
-`--format json` is not supported; AGY headless mode returns text.
+## Exit Codes
 
-Default model behavior:
-- Omit `--model` for `gemini-3.5-flash-medium`, the default for most tasks.
-- Use `gemini-3.1-pro-low` for higher-reasoning tasks.
-- Use `claude-4.6-sonnet-thinking` or `claude-4.6-opus-thinking` only when the user explicitly asks for that Claude model.
+| Code | Meaning | Action |
+|------|---------|--------|
+| `0` | Success | — |
+| `1` | Generic error | Check stderr |
+| `10` | QUOTA_EXAUSTED | Retry later; JSON signal emitted to stdout |
+| `11` | AUTH_REQUIRED | Run `agy` once interactively |
+| `12` | TIMEOUT | Increase `--timeout` or narrow task scope |
+| `13` | AGY_MISSING | Install AGY |
+
+Exit `10` and `11` emit a machine-readable JSON line to stdout:
+```json
+{"status":"QUOTA_EXAUSTED","reason":"quota or rate limit reached","model":"gemini-3.5-flash-medium"}
+```
 
 ## Good Patterns
 
-### Architecture
+### Agentic coding
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src,docs \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  "Refactor the auth module to async/await. Update all callers. Report changed files."
+```
+
+### Create a file
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  "Create relatorio-impostos.html with a full HTML tax report from data/impostos.json."
+```
+
+### Read-only architecture
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --read-only --dirs src,docs \
   "Explain the architecture and cite the key files."
 ```
 
-### Refactor impact
+### Refactor impact (read-only)
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --add-dir src --continue \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --read-only --add-dir src --continue \
   "Analyze the impact of refactoring the auth module. Include affected files and migration steps."
-```
-
-### Workspace agent
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --agent --add-dir . \
-  "Act as an AGY workspace agent and create relatorio-impostos.html."
-```
-
-### Structured data
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --files "schemas/**/*.json,data/**/*.csv" \
-  "Summarize the data contracts and identify breaking changes."
 ```
 
 ## Troubleshooting
@@ -114,6 +127,5 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --files "schemas/**/*
 |-------|----------|
 | Authentication error | Launch `agy` once interactively and sign in. |
 | AGY missing on PATH | macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash`  Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
-| Model selection failed | Launch `agy` interactively and confirm `/model <name>` accepts the requested model. |
-| Rate limiting | Retry with a narrower task or smaller context set. |
-| Token pressure | Reduce the number of inlined files. |
+| QUOTA_EXAUSTED (exit 10) | Wait for quota reset; use `--continue` to resume later with a narrower scope. |
+| TIMEOUT (exit 12) | Increase `--timeout 15m` or split the task into smaller steps. |

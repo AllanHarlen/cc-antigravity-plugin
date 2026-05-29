@@ -8,11 +8,14 @@ import {
   buildAntigravityArgs,
   buildAntigravityPrompt,
   checkAgyConnectivity,
+  classifyAgyOutput,
   collectContextFiles,
   parseCliArgs,
   resolveAgyExe,
   spawnViaConPty,
   stripAnsi,
+  EXIT_QUOTA_EXAUSTED,
+  EXIT_AUTH_REQUIRED,
 } from "../scripts/antigravity-bridge.js";
 
 test("parseCliArgs parses dirs, files, and positional task", () => {
@@ -36,10 +39,11 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     model: undefined,
     timeout: undefined,
     interactive: false,
+    readOnly: false,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
-    skipPermissions: false,
+    skipPermissions: true,   // agentic default
     maxFiles: 40,
     maxFileBytes: 32768,
     printCommand: false,
@@ -513,5 +517,89 @@ test("checkAgyConnectivity: non-zero exit code throws authentication hint", () =
 test("checkAgyConnectivity: exit 0 returns without throwing", () => {
   const fakeSpawn = () => ({ error: null, status: 0, stdout: "agy 1.2.3", stderr: "" });
   assert.doesNotThrow(() => checkAgyConnectivity("agy", fakeSpawn));
+});
+
+// ─── parseCliArgs — agentic defaults ─────────────────────────────────────────
+
+test("parseCliArgs skipPermissions is true by default", () => {
+  const parsed = parseCliArgs(["analyze this"]);
+  assert.equal(parsed.skipPermissions, true);
+  assert.equal(parsed.readOnly, false);
+});
+
+test("parseCliArgs --read-only sets readOnly and disables skipPermissions", () => {
+  const parsed = parseCliArgs(["--read-only", "analyze this"]);
+  assert.equal(parsed.readOnly, true);
+  assert.equal(parsed.skipPermissions, false);
+});
+
+test("parseCliArgs --skip-permissions is a no-op when already true by default", () => {
+  const parsed = parseCliArgs(["--skip-permissions", "analyze this"]);
+  assert.equal(parsed.skipPermissions, true);
+});
+
+// ─── classifyAgyOutput ────────────────────────────────────────────────────────
+
+test("classifyAgyOutput returns QUOTA_EXAUSTED for rate-limit text", () => {
+  const result = classifyAgyOutput("Error: rate limit exceeded, please retry later.");
+  assert.ok(result !== null);
+  assert.equal(result.type, "QUOTA_EXAUSTED");
+  assert.equal(result.exitCode, EXIT_QUOTA_EXAUSTED);
+});
+
+test("classifyAgyOutput returns QUOTA_EXAUSTED for 429 status", () => {
+  const result = classifyAgyOutput("HTTP 429 Too Many Requests");
+  assert.ok(result !== null);
+  assert.equal(result.type, "QUOTA_EXAUSTED");
+});
+
+test("classifyAgyOutput extracts reason from self-reported QUOTA_EXAUSTED line", () => {
+  const result = classifyAgyOutput('QUOTA_EXAUSTED reason="Gemini daily quota exceeded" model="gemini-3.5-flash-medium"');
+  assert.ok(result !== null);
+  assert.equal(result.type, "QUOTA_EXAUSTED");
+  assert.equal(result.reason, "Gemini daily quota exceeded");
+});
+
+test("classifyAgyOutput returns AUTH_REQUIRED for not-authenticated message", () => {
+  const result = classifyAgyOutput("Error: not authenticated. Please sign in first.");
+  assert.ok(result !== null);
+  assert.equal(result.type, "AUTH_REQUIRED");
+  assert.equal(result.exitCode, EXIT_AUTH_REQUIRED);
+});
+
+test("classifyAgyOutput returns null for normal output", () => {
+  const result = classifyAgyOutput("Here is the refactor plan for your codebase:\n1. Extract auth module...");
+  assert.equal(result, null);
+});
+
+test("classifyAgyOutput returns null for empty output", () => {
+  assert.equal(classifyAgyOutput(""), null);
+});
+
+// ─── spawnViaConPty — outputAccumulator ───────────────────────────────────────
+
+test("spawnViaConPty populates outputAccumulator when provided", async () => {
+  const chunks = [];
+  const pty = {
+    spawn: () => {
+      const dataHandlers = [];
+      const exitHandlers = [];
+      setTimeout(() => {
+        dataHandlers.forEach((fn) => fn("hello "));
+        dataHandlers.forEach((fn) => fn("world"));
+        exitHandlers.forEach((fn) => fn({ exitCode: 0 }));
+      }, 0);
+      return {
+        onData: (fn) => dataHandlers.push(fn),
+        onExit: (fn) => exitHandlers.push(fn),
+        kill: () => {},
+      };
+    },
+  };
+  const exitCode = await spawnViaConPty("agy", ["--print", "x"], pty, 1000, {
+    write: () => true,
+  }, chunks);
+  assert.equal(exitCode, 0);
+  assert.deepEqual(chunks, ["hello ", "world"]);
 });
 

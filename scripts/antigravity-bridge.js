@@ -75,6 +75,33 @@ const MEDIA_TYPES = new Map([
   [".yml", "application/yaml"],
 ]);
 
+// Structured exit codes the caller (Claude Code / orchestrators) can act on.
+export const EXIT_SUCCESS = 0;
+export const EXIT_QUOTA_EXAUSTED = 10;
+export const EXIT_AUTH_REQUIRED = 11;
+export const EXIT_TIMEOUT = 12;
+export const EXIT_AGY_MISSING = 13;
+export const EXIT_ERROR = 1;
+
+// Patterns that identify rate-limit / quota responses in AGY output.
+const QUOTA_PATTERNS = [
+  /QUOTA_EXAUSTED/,
+  /quota.*exceeded/i,
+  /rate.?limit/i,
+  /resource.?exhausted/i,
+  /\b429\b/,
+  /too many requests/i,
+  /daily.*limit/i,
+];
+
+const AUTH_PATTERNS = [
+  /not authenticated/i,
+  /authentication.*required/i,
+  /please.{0,20}sign.?in/i,
+  /\bunauthorized\b/i,
+  /\b401\b/,
+];
+
 const USAGE = `Usage:
   node "\${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] <task>
 
@@ -82,20 +109,36 @@ Options:
   --task <text>              Explicit task text.
   --dirs <path,...>          Directories to ingest recursively.
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
+                             Default: current working directory (added automatically).
   --files <glob,...>         File globs to ingest.
   --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
+  --model <name>             Requested model (parsed but not forwarded — AGY has no --model CLI flag).
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
-  --agent                    Alias for --interactive; intended for AGY workspace-editing sessions.
+  --agent                    Alias for --interactive; intended for human-at-terminal sessions.
+  --read-only                Disable --dangerously-skip-permissions and workspace auto-add.
+                             Use for analysis-only tasks that must not modify files.
   --continue, -c             Continue the most recent AGY conversation.
   --conversation <id>        Resume a specific AGY conversation.
   --sandbox                  Enable AGY sandbox mode.
-  --skip-permissions         Forward --dangerously-skip-permissions to AGY.
+  --skip-permissions         Explicitly forward --dangerously-skip-permissions (on by default).
   --max-files <n>            Maximum files to inline. Default: 40.
   --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
   --print-command            Print the resolved agy command and exit.
   -h, --help                 Show this help message.
+
+Defaults:
+  Agentic mode is ON by default: --dangerously-skip-permissions is forwarded and the current
+  working directory is added to AGY's workspace via --add-dir. Pass --read-only to disable.
+
+Exit codes:
+   0  Success
+   1  Generic error
+  10  QUOTA_EXAUSTED  — quota or rate limit hit; workflow should retry or pause
+  11  AUTH_REQUIRED   — AGY needs interactive sign-in (run \`agy\` once)
+  12  TIMEOUT         — AGY did not respond within the configured timeout
+  13  AGY_MISSING     — Antigravity CLI not found on PATH
 
 Logging:
   Plugin events are always written to a JSONL log file.
@@ -114,6 +157,7 @@ function summarizeParsedArgs(parsed) {
     model: parsed.model,
     timeout: parsed.timeout,
     interactive: parsed.interactive,
+    readOnly: parsed.readOnly,
     continueConversation: parsed.continueConversation,
     conversationId: parsed.conversationId,
     sandbox: parsed.sandbox,
@@ -206,6 +250,28 @@ function takeOptionValue(argv, index, flagName) {
   return value;
 }
 
+// Scans AGY output for quota/auth signals and returns a classification or null.
+export function classifyAgyOutput(output) {
+  if (QUOTA_PATTERNS.some((p) => p.test(output))) {
+    const reasonMatch = output.match(/QUOTA_EXAUSTED\s+reason="([^"]+)"/);
+    const reason = reasonMatch ? reasonMatch[1] : "quota or rate limit reached";
+    return { type: "QUOTA_EXAUSTED", reason, exitCode: EXIT_QUOTA_EXAUSTED };
+  }
+  if (AUTH_PATTERNS.some((p) => p.test(output))) {
+    return {
+      type: "AUTH_REQUIRED",
+      reason: "authentication required — run `agy` once interactively to sign in",
+      exitCode: EXIT_AUTH_REQUIRED,
+    };
+  }
+  return null;
+}
+
+// Emits a single machine-readable JSON line that orchestrators / Claude Code can parse.
+function emitStructuredSignal(type, reason, model, _stdout) {
+  _stdout.write(JSON.stringify({ status: type, reason, model }) + "\n");
+}
+
 export function parseCliArgs(argv) {
   const parsed = {
     dirs: [],
@@ -215,10 +281,11 @@ export function parseCliArgs(argv) {
     model: undefined,
     timeout: undefined,
     interactive: false,
+    readOnly: false,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
-    skipPermissions: false,
+    skipPermissions: true,   // agentic by default; --read-only disables
     maxFiles: DEFAULT_MAX_FILES,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     printCommand: false,
@@ -268,6 +335,10 @@ export function parseCliArgs(argv) {
       case "--interactive":
       case "--agent":
         parsed.interactive = true;
+        break;
+      case "--read-only":
+        parsed.readOnly = true;
+        parsed.skipPermissions = false;
         break;
       case "--continue":
       case "-c":
@@ -512,17 +583,22 @@ ${task}
 </task>
 
 <constraints>
-- Use the provided workspace context when it is relevant.
-- Cite file paths when referring to evidence from inline context.
-- Call out when the context is partial, skipped, or truncated.
-- Do not invent files or data that are not present in the provided payloads.
+- You are an agentic coding assistant. Complete the task fully using your available tools.
+- Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
+- Use grep_search, view_file, and list_dir to explore and search the workspace.
+- Use run_command to execute shell commands when needed.
+- Use the provided inline context when relevant; cite file paths when referencing it.
+- If inline context is partial or truncated, read the full files with view_file before acting.
+- Complete the entire task without stopping mid-way. Report all changes made at the end.
+- If you hit a quota or rate limit, immediately output on its own line and then stop:
+  QUOTA_EXAUSTED reason="<specific reason>" model="<model name>"
 </constraints>`;
 }
 
 export function buildAntigravityArgs({
   prompt,
-  model: _model,  // accepted but not forwarded; AGY has no --model CLI flag
-  format: _format,  // accepted but not forwarded; AGY headless returns text only
+  model: _model,   // accepted but not forwarded; AGY has no --model CLI flag
+  format: _format, // accepted but not forwarded; AGY headless returns text only
   timeout,
   interactive = false,
   continueConversation = false,
@@ -607,7 +683,8 @@ export function stripAnsi(raw) {
     .replace(/\r/g, "\n");
 }
 
-const CONPTY_TIMEOUT_MS = 120_000;
+// 10 minutes: agentic coding tasks routinely take longer than the old 2-minute default.
+const CONPTY_TIMEOUT_MS = 600_000;
 
 function parseTimeoutMs(timeout) {
   if (!timeout) return CONPTY_TIMEOUT_MS;
@@ -622,13 +699,15 @@ function parseTimeoutMs(timeout) {
 }
 
 function buildAgyMissingError() {
-  return new Error(
+  const err = new Error(
     "Antigravity CLI (agy) is not installed or not on PATH.\n" +
       "Install it with:\n" +
       "  macOS/Linux:  curl -fsSL https://antigravity.google/cli/install.sh | bash\n" +
       "  Windows:      irm https://antigravity.google/cli/install.ps1 | iex\n" +
       "Then authenticate by launching `agy` once.",
   );
+  err.code = "EAGYMISSING";
+  return err;
 }
 
 export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
@@ -660,11 +739,17 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
   }
 }
 
-
-
 // PTY merges stdout and stderr into a single stream by design; agy error output
 // (auth failures, rate limits) will appear in the same stream as the response body.
-export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TIMEOUT_MS, _stdout = process.stdout) {
+// outputAccumulator, if provided, receives each clean chunk for post-run classification.
+export async function spawnViaConPty(
+  agyExe,
+  agyArgs,
+  pty,
+  timeoutMs = CONPTY_TIMEOUT_MS,
+  _stdout = process.stdout,
+  outputAccumulator = null,
+) {
   return new Promise((resolve, reject) => {
     let wroteOutput = false;
     let lastOutput = "";
@@ -693,10 +778,12 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
     const timer = setTimeout(() => {
       try { term.kill(); } catch { /* already dead */ }
       logEvent("agy.conpty.timeout", { timeoutMs });
-      reject(new Error(
+      const timeoutErr = new Error(
         `agy did not respond within ${timeoutMs / 1000}s.\n` +
         "Check authentication (run `agy` once interactively) and network connectivity.",
-      ));
+      );
+      timeoutErr.code = "ETIMEDOUT";
+      reject(timeoutErr);
     }, timeoutMs);
 
     term.onData((data) => {
@@ -704,6 +791,7 @@ export async function spawnViaConPty(agyExe, agyArgs, pty, timeoutMs = CONPTY_TI
       if (clean) {
         wroteOutput = true;
         lastOutput = clean;
+        if (outputAccumulator !== null) outputAccumulator.push(clean);
         if (shouldLogAgyOutput()) {
           logEvent("agy.output.chunk", { text: clean });
         }
@@ -746,7 +834,7 @@ export async function main(argv = process.argv.slice(2), {
     if (parsed.help) {
       _stdout.write(USAGE);
       logEvent("bridge.help", {});
-      return 0;
+      return EXIT_SUCCESS;
     }
 
     const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
@@ -755,6 +843,12 @@ export async function main(argv = process.argv.slice(2), {
       model,
       source: parsed.model ? "flag" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"),
     });
+
+    // In agentic mode, automatically add cwd to the AGY workspace when the caller
+    // did not specify any --add-dir. This gives AGY access to the project by default.
+    const effectiveAddDirs = (!parsed.readOnly && parsed.addDirs.length === 0)
+      ? [process.cwd()]
+      : parsed.addDirs;
 
     const context = await collectContextFiles({
       cwd: process.cwd(),
@@ -773,16 +867,16 @@ export async function main(argv = process.argv.slice(2), {
       interactive: parsed.interactive,
       continueConversation: parsed.continueConversation,
       conversationId: parsed.conversationId,
-      addDirs: parsed.addDirs,
+      addDirs: effectiveAddDirs,
       sandbox: parsed.sandbox,
       skipPermissions: parsed.skipPermissions,
     });
-    logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout });
+    logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout, readOnly: parsed.readOnly });
 
     if (parsed.printCommand) {
       printResolvedCommands(agyArgs, _stdout);
       logEvent("bridge.print-command", { args: summarizeAgyArgs(agyArgs) });
-      return 0;
+      return EXIT_SUCCESS;
     }
 
     const agyExe = resolveAgyExe(_spawnSync);
@@ -808,13 +902,16 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     if (ptyModule) {
+      const outputChunks = [];
+      let ptyExitCode;
       try {
-        return await spawnViaConPty(
+        ptyExitCode = await spawnViaConPty(
           agyExe,
           agyArgs,
           ptyModule,
           timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
           _stdout,
+          outputChunks,
         );
       } catch (err) {
         if (err?.code === "ENOENT" || String(err).includes("not found")) {
@@ -822,6 +919,14 @@ export async function main(argv = process.argv.slice(2), {
         }
         throw err;
       }
+      const fullOutput = outputChunks.join("");
+      const sig = classifyAgyOutput(fullOutput);
+      if (sig) {
+        emitStructuredSignal(sig.type, sig.reason, model, _stdout);
+        logEvent("bridge.classified", { type: sig.type, reason: sig.reason, model, exitCode: sig.exitCode });
+        return sig.exitCode;
+      }
+      return ptyExitCode;
     }
 
     // Fallback for platforms or installs where node-pty is unavailable.
@@ -838,13 +943,15 @@ export async function main(argv = process.argv.slice(2), {
       throw result.error;
     }
     logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
-    return result.status ?? 1;
+    return result.status ?? EXIT_ERROR;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("bridge.error", { message });
     const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH || resolveDefaultLogPath();
     _stderr.write(`${message}\nPlugin log: ${logPath}\n`);
-    return 1;
+    if (error?.code === "ETIMEDOUT") return EXIT_TIMEOUT;
+    if (error?.code === "EAGYMISSING") return EXIT_AGY_MISSING;
+    return EXIT_ERROR;
   }
 }
 

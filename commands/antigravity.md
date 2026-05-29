@@ -1,15 +1,17 @@
 ---
-description: Invoke the shared Antigravity (AGY) bridge for long-context code exploration, analysis, and documentation generation
+description: Invoke the Antigravity (AGY) bridge as an agentic coding assistant — creates, edits, and searches files autonomously using AGY's native tools
 allowed-tools: Bash, Glob, Read
-argument-hint: "[--model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--agent] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
 
-Use the shared Antigravity bridge for long-context code exploration,
-architecture review, documentation synthesis, and structured data analysis.
-The bridge collects optional local context, maps supported runtime flags to AGY,
-selects the requested AGY model, and then runs one deterministic AGY task call.
+Runs an Antigravity CLI (AGY) agentic session to complete coding tasks. AGY receives
+the task and uses its native tools (`write_to_file`, `replace_file_content`,
+`grep_search`, `run_command`, etc.) to complete the work autonomously.
+
+By default, the bridge runs with `--dangerously-skip-permissions` and adds the current
+working directory to the AGY workspace. Pass `--read-only` for analysis-only tasks.
 
 ## Usage
 
@@ -18,23 +20,30 @@ selects the requested AGY model, and then runs one deterministic AGY task call.
 /cc-antigravity-plugin:antigravity --dirs <path,...> <task>
 /cc-antigravity-plugin:antigravity --files <pattern,...> <task>
 /cc-antigravity-plugin:antigravity --add-dir <path> <task>
+/cc-antigravity-plugin:antigravity --read-only <task>
 ```
 
 ## Arguments
 
 | Argument | Description | Example |
 |----------|-------------|---------|
-| `--model <name>` | Select the AGY model for this call via `agy -i "/model ..."` | `--model gemini-3.1-pro-low` |
-| `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs,data` |
-| `--add-dir <path>` | Add a directory to AGY's native workspace support. Repeatable | `--add-dir src` |
-| `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json,data/**/*.csv"` |
+| `--model <name>` | Requested model (parsed, not forwarded — AGY has no `--model` CLI flag) | `--model gemini-3.1-pro-low` |
+| `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs` |
+| `--add-dir <path>` | Add a directory to AGY's native workspace. Repeatable | `--add-dir src` |
+| `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json"` |
+| `--read-only` | Disable skip-permissions and workspace auto-add (analysis mode) | `--read-only` |
 | `--continue`, `-c` | Continue the most recent AGY conversation | `--continue` |
 | `--conversation <id>` | Resume a specific AGY conversation | `--conversation abc123` |
-| `--timeout <duration>` | Forward `--print-timeout` to AGY | `--timeout 3m` |
-| `--agent`, `--interactive` | Use AGY `--prompt-interactive` for an agent-style workspace session | `--agent --add-dir .` |
+| `--timeout <duration>` | Forward `--print-timeout` to AGY | `--timeout 10m` |
+| `--interactive` | Use AGY `--prompt-interactive` for a human-at-terminal session | `--interactive` |
 | `--sandbox` | Enable AGY sandbox mode | `--sandbox` |
-| `--skip-permissions` | Forward `--dangerously-skip-permissions` to AGY | `--skip-permissions` |
-| `<task>` | Analysis task or question | required |
+| `<task>` | Coding task or question | required |
+
+## Defaults
+
+- `--dangerously-skip-permissions` is always forwarded (agentic mode)
+- The current working directory is added to AGY's workspace via `--add-dir <cwd>`
+- Timeout: 10 minutes (override with `--timeout`)
 
 ## Execution Instructions
 
@@ -45,46 +54,54 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] -- "<TASK>"
 ```
 
 Guidance:
-- Use `--dirs` for broad module or service areas that should be inlined.
-- Use `--files` for precise globs or structured data slices.
-- Use `--add-dir` when AGY should access the directory through its own workspace mechanism.
-- When `--model` is omitted, the bridge selects `gemini-3.5-flash-medium`.
-- Use `gemini-3.5-flash-medium` for most tasks and `gemini-3.1-pro-low` for higher-reasoning tasks.
-- Use Claude models only when the user explicitly passes `--model claude-4.6-sonnet-thinking` or `--model claude-4.6-opus-thinking`.
-- Use `--agent --add-dir .` when AGY should act as a workspace agent instead of only returning text.
-- Keep the task direct, scoped, and explicit about the output shape.
-- `--format json` is not supported; AGY headless mode returns text.
+- Default invocation is agentic: AGY will create/edit/delete files and run commands.
+- Use `--read-only` when the task is pure analysis and should not modify files.
+- Use `--dirs` to inline broad module slices into the prompt for context.
+- Use `--files` for precise globs or structured data (JSON, CSV, YAML).
+- Use `--add-dir` when AGY should access additional directories through its workspace.
+- Keep the task direct, scoped, and explicit about the expected output.
+
+## Exit Codes
+
+| Code | Meaning | Action |
+|------|---------|--------|
+| `0` | Success | — |
+| `1` | Generic error | Check stderr |
+| `10` | `QUOTA_EXAUSTED` | Retry later or switch model; structured JSON emitted to stdout |
+| `11` | `AUTH_REQUIRED` | Run `agy` once interactively to sign in |
+| `12` | `TIMEOUT` | Increase `--timeout` or narrow the task scope |
+| `13` | `AGY_MISSING` | Install AGY (see below) |
+
+When exit code `10` or `11` is returned, a JSON line is written to stdout:
+```json
+{"status":"QUOTA_EXAUSTED","reason":"quota or rate limit reached","model":"gemini-3.5-flash-medium"}
+```
 
 ## Examples
 
-### Simple query
+### Coding task (default agentic mode)
 ```bash
-/cc-antigravity-plugin:antigravity what is 2+2
+/cc-antigravity-plugin:antigravity refactor the auth module to use async/await throughout
 ```
 
-### Architecture review
+### Create a file
 ```bash
-/cc-antigravity-plugin:antigravity --dirs src,docs explain the architecture of this codebase
+/cc-antigravity-plugin:antigravity create relatorio-impostos.html with a full HTML tax report
 ```
 
-### Native AGY workspace
+### Analysis only (read-only)
 ```bash
-/cc-antigravity-plugin:antigravity --add-dir src analyze the refactor impact of the auth module
+/cc-antigravity-plugin:antigravity --read-only --dirs src explain the architecture of this codebase
 ```
 
-### Resume work with a deeper Gemini model
+### Inline context + coding
 ```bash
-/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --continue summarize the next migration steps
+/cc-antigravity-plugin:antigravity --dirs src,docs add OpenAPI annotations to all Express routes
 ```
 
-### Explicit Claude model
+### Continue previous session
 ```bash
-/cc-antigravity-plugin:antigravity --model claude-4.6-sonnet-thinking review the migration plan
-```
-
-### Agent workspace session
-```bash
-/cc-antigravity-plugin:antigravity --agent --add-dir . create relatorio-impostos.html with an HTML tax report
+/cc-antigravity-plugin:antigravity --continue fix the failing tests from the previous session
 ```
 
 ## Error Handling
@@ -93,6 +110,5 @@ Guidance:
 |-------|----------|
 | Authentication error | Launch `agy` once interactively and sign in. Use `/logout` inside the TUI to clear cached credentials. |
 | AGY missing on PATH | macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash`  Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
-| Model selection failed | Run `agy` interactively, confirm `/model <name>` accepts the requested model, then retry. |
-| Token limit exceeded | Narrow the inlined scope with `--files` or fewer `--dirs`. |
-| Timeout | Increase `--timeout`, reduce the context set, or tighten the task. |
+| QUOTA_EXAUSTED | Wait for quota reset or use `--continue` to resume with a narrower scope. |
+| Timeout | Increase `--timeout 15m`, reduce the task scope, or split into steps. |
