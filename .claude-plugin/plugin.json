@@ -15,10 +15,11 @@
         "agy",
         "google",
         "gemini",
+        "agentic",
+        "code-generation",
         "code-exploration",
-        "analysis",
         "long-context",
-        "documentation",
+        "architecture",
         "codex",
         "claude-code"
     ],
@@ -29,11 +30,17 @@
     "agents": [
         "./agents/antigravity-agent.md"
     ],
+    "hooks": "./hooks/hooks.json",
+    "requiresExternalTool": {
+        "name": "agy",
+        "installUrl": "https://antigravity.google/cli/install.sh",
+        "description": "Antigravity CLI (AGY) — Google's long-context agentic coding terminal"
+    },
     "userConfig": {
         "default_model": {
             "type": "string",
             "title": "Default AGY Model",
-            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium.",
+            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium, auto.",
             "default": "gemini-3.5-flash-medium"
         },
         "timeout": {
