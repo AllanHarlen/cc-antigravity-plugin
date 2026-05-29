@@ -33,6 +33,7 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     addDirs: [],
     files: ["**/*.json", "docs/**/*.md"],
     format: "text",
+    model: undefined,
     timeout: undefined,
     interactive: false,
     continueConversation: false,
@@ -86,7 +87,9 @@ test("collectContextFiles skips ignored dependency directories", async () => {
 
   assert.equal(context.included.length, 1);
   assert.equal(context.included[0]?.path, "app.js");
-  assert.equal(context.skipped[0]?.reason, "ignored-path");
+  // With early dir pruning in walkDirSync, node_modules is never traversed
+  // so nothing from it appears in skipped — it is silently discarded at walk time.
+  assert.equal(context.skipped.length, 0);
 });
 
 test("buildAntigravityPrompt renders task, inventory, and file payloads", () => {
@@ -258,6 +261,17 @@ test("parseCliArgs parses AGY passthrough and conversation flags", () => {
   assert.equal(parsed.sandbox, true);
   assert.equal(parsed.skipPermissions, true);
   assert.equal(parsed.interactive, true);
+});
+
+test("parseCliArgs --model sets model and does not contaminate task", () => {
+  const parsed = parseCliArgs(["--model", "gemini-3.1-pro-low", "analyze this codebase"]);
+  assert.equal(parsed.model, "gemini-3.1-pro-low");
+  assert.equal(parsed.task, "analyze this codebase");
+});
+
+test("parseCliArgs --model defaults to undefined when omitted", () => {
+  const parsed = parseCliArgs(["analyze this"]);
+  assert.equal(parsed.model, undefined);
 });
 
 test("parseCliArgs --max-files and --max-file-bytes accept custom values", () => {

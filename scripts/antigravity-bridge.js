@@ -7,6 +7,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
+import { resolveDefaultLogPath, logEvent } from "./utils.js";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
@@ -104,45 +105,13 @@ Logging:
   Include output chunks in log: CC_ANTIGRAVITY_LOG_OUTPUT=1
 `;
 
-function resolveDefaultLogPath() {
-  const isWin = process.platform === "win32";
-  const date = new Date().toISOString().slice(0, 10);
-  const baseDir = isWin
-    ? path.join(
-        process.env.LOCALAPPDATA ??
-          path.join(process.env.USERPROFILE ?? "", "AppData", "Local"),
-        "agy",
-        "cc-plugin-logs",
-      )
-    : path.join(process.env.HOME ?? "", ".local", "share", "agy", "cc-plugin-logs");
-  return path.join(baseDir, `plugin-${date}.jsonl`);
-}
-
-function logEvent(event, data = {}) {
-  const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH || resolveDefaultLogPath();
-  try {
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fs.appendFileSync(
-      logPath,
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        pid: process.pid,
-        event,
-        ...data,
-      }) + "\n",
-      "utf8",
-    );
-  } catch {
-    // Logging must never affect plugin execution.
-  }
-}
-
 function summarizeParsedArgs(parsed) {
   return {
     dirs: parsed.dirs,
     addDirs: parsed.addDirs,
     files: parsed.files,
     format: parsed.format,
+    model: parsed.model,
     timeout: parsed.timeout,
     interactive: parsed.interactive,
     continueConversation: parsed.continueConversation,
@@ -243,6 +212,7 @@ export function parseCliArgs(argv) {
     addDirs: [],
     files: [],
     format: "text",
+    model: undefined,
     timeout: undefined,
     interactive: false,
     continueConversation: false,
@@ -285,6 +255,10 @@ export function parseCliArgs(argv) {
         break;
       case "--files":
         parsed.files.push(...splitList(takeOptionValue(argv, index, token)));
+        index += 1;
+        break;
+      case "--model":
+        parsed.model = takeOptionValue(argv, index, token);
         index += 1;
         break;
       case "--timeout":
@@ -353,7 +327,7 @@ export function parseCliArgs(argv) {
   return parsed;
 }
 
-function walkDirSync(dir) {
+function walkDirSync(dir, baseCwd = dir) {
   const results = [];
   let entries;
   try {
@@ -363,9 +337,10 @@ function walkDirSync(dir) {
   }
 
   for (const entry of entries) {
+    if (IGNORED_PATH_SEGMENTS.has(entry.name)) continue;
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...walkDirSync(fullPath));
+      results.push(...walkDirSync(fullPath, baseCwd));
     } else if (entry.isFile()) {
       results.push(fullPath);
     }
@@ -546,6 +521,8 @@ ${task}
 
 export function buildAntigravityArgs({
   prompt,
+  model: _model,  // accepted but not forwarded; AGY has no --model CLI flag
+  format: _format,  // accepted but not forwarded; AGY headless returns text only
   timeout,
   interactive = false,
   continueConversation = false,
@@ -772,6 +749,13 @@ export async function main(argv = process.argv.slice(2), {
       return 0;
     }
 
+    const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
+    const model = parsed.model ?? defaultModel;
+    logEvent("bridge.model.resolved", {
+      model,
+      source: parsed.model ? "flag" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"),
+    });
+
     const context = await collectContextFiles({
       cwd: process.cwd(),
       dirs: parsed.dirs,
@@ -784,6 +768,7 @@ export async function main(argv = process.argv.slice(2), {
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
       prompt,
+      model,
       timeout,
       interactive: parsed.interactive,
       continueConversation: parsed.continueConversation,
