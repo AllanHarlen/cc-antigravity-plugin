@@ -23,17 +23,27 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 # Windows PowerShell
 irm https://antigravity.google/cli/install.ps1 | iex
+```
 
-# Autenticar (necessário uma vez)
-agy
+Após instalar, rode `agy` uma vez para fazer login e confirme que está funcionando:
+
+```bash
+agy --print "what is 2+2"
 ```
 
 ## Instalação
 
-### Claude Code
+### Claude Code (recomendado)
 
 ```bash
 /plugin marketplace add AllanHarlen/cc-antigravity-plugin
+/reload-plugins
+```
+
+Para testar uma cópia local do repositório:
+
+```bash
+/plugin install ./
 /reload-plugins
 ```
 
@@ -43,6 +53,8 @@ agy
 git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
   ~/.agents/skills/cc-antigravity-plugin
 ```
+
+Reinicie o Codex após clonar.
 
 ## Uso
 
@@ -64,6 +76,12 @@ git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
 
 # Continuar sessão anterior
 /cc-antigravity-plugin:antigravity --continue "Continue a partir do passo 3 da refatoração anterior"
+```
+
+No Codex, use o agente via:
+
+```text
+@antigravity-agent <tarefa>
 ```
 
 ## Modelos disponíveis
@@ -109,6 +127,36 @@ npm test
 ```
 
 Cobertura: parse de argumentos · coleta de contexto · geração de prompt · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
+
+## Desenvolvimento
+
+### Variáveis de ambiente
+
+| Variável | Descrição |
+|---|---|
+| `CC_ANTIGRAVITY_LOG_PATH` | Caminho customizado para o arquivo de log JSONL |
+| `CC_ANTIGRAVITY_LOG_OUTPUT` | Defina como `1` para incluir o output do AGY nos logs |
+
+Log padrão: `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (Windows) ou `~/.local/share/agy/cc-plugin-logs/` (Linux).
+
+### Teste local com logs em tempo real (Windows)
+
+```powershell
+.\scripts\run-claude-plugin-dev.ps1
+```
+
+O script define `CC_ANTIGRAVITY_LOG_PATH` para a sessão e abre uma segunda janela com `Get-Content -Wait` no log.
+
+## Solução de Problemas
+
+| Problema | Solução |
+|---|---|
+| Erro de autenticação | Rode `agy` interativamente e faça login. |
+| `agy` não encontrado | Rode o instalador do AGY e confirme que o binário está no PATH. |
+| Seleção de modelo ignorada | Verifique se `%LOCALAPPDATA%\agy\settings.json` foi criado e removido após a execução. |
+| Pressão de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
+| Timeout prematuro | Aumente `--timeout`, reduza o contexto ou divida a tarefa em etapas. |
+| Plugin não carregado | Rode `/reload-plugins` ou reinicie o Claude Code. |
 
 ## Licença
 
