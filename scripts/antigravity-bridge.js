@@ -122,6 +122,11 @@ Options:
                                         auto (selects flash tier by context size)
   --generate-imagem          Generate an image from the task description using AGY's Nano Banana model.
                              Defaults --model to nano-banana. Compatible with --model to override.
+  --parallel                 Allow AGY to fan the task out across multiple native Gemini subagents
+                             (DefineSubagent / invoke_subagent / ManageSubagents). AGY decides how
+                             many subagents to spawn based on the task's independent subparts.
+  --subagent-model <name>    Model the spawned subagents should use. Conveyed via the prompt (AGY has
+                             no per-subagent CLI flag). Implies --parallel. Defaults to the main model.
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
@@ -175,6 +180,8 @@ function summarizeParsedArgs(parsed) {
     maxFileBytes: parsed.maxFileBytes,
     printCommand: parsed.printCommand,
     generateImagem: parsed.generateImagem,
+    parallel: parsed.parallel,
+    subagentModel: parsed.subagentModel,
     help: parsed.help,
     taskLength: parsed.task.length,
   };
@@ -304,6 +311,8 @@ export function parseCliArgs(argv) {
     printCommand: false,
     generateImagem: false,
     outputDir: undefined,
+    parallel: false,
+    subagentModel: undefined,
     task: "",
     help: false,
   };
@@ -399,6 +408,14 @@ export function parseCliArgs(argv) {
       case "--generate-imagem":
       case "--generate-image":
         parsed.generateImagem = true;
+        break;
+      case "--parallel":
+        parsed.parallel = true;
+        break;
+      case "--subagent-model":
+        parsed.subagentModel = takeOptionValue(argv, index, token);
+        parsed.parallel = true;   // a subagent model is meaningless without fan-out
+        index += 1;
         break;
       case "--output-dir":
         parsed.outputDir = takeOptionValue(argv, index, token);
@@ -574,7 +591,26 @@ export async function collectContextFiles({
   return { included, skipped };
 }
 
-export function buildAntigravityPrompt({ task, context }) {
+// Builds the optional <parallelism> block appended to the constraints when --parallel is set.
+// Returns "" when parallelism is disabled so the default prompt stays byte-for-byte unchanged.
+export function buildParallelismBlock({ parallel = false, subagentModel } = {}) {
+  if (!parallel) return "";
+  const modelLine = subagentModel
+    ? `- Configure each subagent to use the model "${agyModelLabel(subagentModel)}".\n`
+    : "";
+  return `
+
+<parallelism>
+- You MAY decompose this task into independent subtasks and run them concurrently using your
+  native subagent tools (DefineSubagent, invoke_subagent / Agent, ManageSubagents).
+- Spawn subagents only for genuinely independent work; keep shared or sequential steps in the main agent.
+- Decide the number of subagents yourself based on how many independent subparts the task has.
+${modelLine}- Wait for every subagent to finish (poll with ManageSubagents) before concluding.
+- Aggregate the subagents' outputs into one final report, and list each subagent's purpose and conversation ID.
+</parallelism>`;
+}
+
+export function buildAntigravityPrompt({ task, context, parallel = false, subagentModel }) {
   const inventoryLines = [];
 
   if (context.included.length > 0) {
@@ -628,7 +664,7 @@ ${task}
 - Complete the entire task without stopping mid-way. Report all changes made at the end.
 - If you hit a quota or rate limit, immediately output on its own line and then stop:
   QUOTA_EXAUSTED reason="<specific reason>" model="<model name>"
-</constraints>`;
+</constraints>${buildParallelismBlock({ parallel, subagentModel })}`;
 }
 
 export function buildImagePrompt({ task, context, outputDir }) {
@@ -1075,9 +1111,18 @@ export async function main(argv = process.argv.slice(2), {
       logEvent("bridge.model.resolved", { model, source: modelSource });
     }
     const imageOutputDir = parsed.outputDir ? path.resolve(parsed.outputDir) : process.cwd();
+    // --parallel and image generation are mutually exclusive; ignore parallel for images.
+    if (parsed.parallel && parsed.generateImagem) {
+      logEvent("bridge.parallel.ignored", { reason: "generate-imagem" });
+    }
     const prompt = parsed.generateImagem
       ? buildImagePrompt({ task: parsed.task, context, outputDir: imageOutputDir })
-      : buildAntigravityPrompt({ task: parsed.task, context });
+      : buildAntigravityPrompt({
+          task: parsed.task,
+          context,
+          parallel: parsed.parallel,
+          subagentModel: parsed.subagentModel,
+        });
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
       prompt,

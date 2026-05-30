@@ -1,8 +1,8 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.5.4",
-    "description": "Agentic coding assistant powered by Antigravity CLI (AGY) — creates, edits, and searches files autonomously with model selection, QUOTA_EXAUSTED signaling, and conversation continuity",
+    "version": "3.6.0",
+    "description": "Agentic coding assistant powered by Antigravity CLI (AGY) — creates, edits, and searches files autonomously with model selection, native Gemini subagent parallelism, QUOTA_EXAUSTED signaling, and conversation continuity",
     "author": {
         "name": "Allan Harlen",
         "email": "allanharlen@gmail.com"

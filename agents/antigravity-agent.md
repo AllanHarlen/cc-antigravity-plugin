@@ -67,6 +67,11 @@ Use Antigravity for:
 
 Pass `--read-only` when the task is pure analysis and should not modify any files.
 
+Pass `--parallel` when the task has several **independent** deliverables that can be
+produced concurrently (e.g. "create two separate reports", "generate three components").
+AGY fans the work out across native Gemini subagents and aggregates the results. Add
+`--subagent-model <name>` to run the subagents on a cheaper model than the main session.
+
 ## Execution Process
 
 1. Understand the user task and decide whether Antigravity is appropriate.
@@ -106,6 +111,12 @@ Additional workspace directories:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --add-dir src -- "<TASK>"
+```
+
+Parallel subagents (independent deliverables):
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --parallel --subagent-model gemini-3.5-flash-medium -- "<TASK>"
 ```
 
 Continue previous session:

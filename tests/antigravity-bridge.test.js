@@ -53,9 +53,23 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     maxFileBytes: 32768,
     printCommand: false,
     generateImagem: false,
+    outputDir: undefined,
+    parallel: false,
+    subagentModel: undefined,
     help: false,
     task: "analyze the workspace",
   });
+});
+
+test("parseCliArgs handles --parallel and --subagent-model", () => {
+  const justParallel = parseCliArgs(["--parallel", "fan", "out"]);
+  assert.equal(justParallel.parallel, true);
+  assert.equal(justParallel.subagentModel, undefined);
+
+  // --subagent-model implies --parallel even when --parallel is absent
+  const withModel = parseCliArgs(["--subagent-model", "gemini-3.5-flash-medium", "fan", "out"]);
+  assert.equal(withModel.parallel, true);
+  assert.equal(withModel.subagentModel, "gemini-3.5-flash-medium");
 });
 
 
@@ -123,6 +137,37 @@ test("buildAntigravityPrompt renders task, inventory, and file payloads", () => 
   assert.match(prompt, /payload\.json/);
   assert.match(prompt, /application\/json/);
   assert.match(prompt, /image\.png \(unsupported-extension\)/);
+});
+
+test("buildAntigravityPrompt omits the parallelism block by default", () => {
+  const prompt = buildAntigravityPrompt({
+    task: "Do one thing",
+    context: { included: [], skipped: [] },
+  });
+  assert.doesNotMatch(prompt, /<parallelism>/);
+});
+
+test("buildAntigravityPrompt adds the parallelism block when parallel is set", () => {
+  const prompt = buildAntigravityPrompt({
+    task: "Build two independent reports",
+    context: { included: [], skipped: [] },
+    parallel: true,
+  });
+  assert.match(prompt, /<parallelism>/);
+  assert.match(prompt, /DefineSubagent/);
+  assert.match(prompt, /ManageSubagents/);
+  // No subagent model specified → no model-configuration line
+  assert.doesNotMatch(prompt, /Configure each subagent to use the model/);
+});
+
+test("buildAntigravityPrompt embeds the resolved subagent model label", () => {
+  const prompt = buildAntigravityPrompt({
+    task: "Build two independent reports",
+    context: { included: [], skipped: [] },
+    parallel: true,
+    subagentModel: "gemini-3.5-flash-medium",
+  });
+  assert.match(prompt, /Configure each subagent to use the model "Gemini 3\.5 Flash \(Medium\)"/);
 });
 
 test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {

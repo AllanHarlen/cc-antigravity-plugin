@@ -11,6 +11,7 @@ O AGY é um terminal CLI do Google com janela de contexto longa (2M tokens). Est
 - Geração de código que atravessa várias camadas do projeto
 - Análise de arquitetura e impacto de mudanças com contexto completo
 - Tarefas que se beneficiam dos modelos Gemini Pro de raciocínio profundo
+- Tarefas com múltiplos entregáveis independentes que podem rodar em paralelo via subagentes Gemini nativos (`--parallel`)
 
 ## Pré-requisitos
 
@@ -76,6 +77,12 @@ Reinicie o Codex após clonar.
 # Modelo automático (selecionado pelo tamanho do contexto inline)
 /cc-antigravity-plugin:antigravity --model auto --dirs src "Refatore os controllers"
 
+# Subagentes paralelos — AGY divide a tarefa em subagentes Gemini nativos e concorrentes
+/cc-antigravity-plugin:antigravity --parallel "Crie dois relatórios HTML em relatorio/: impostos em carros elétricos e em carros a combustão no Brasil"
+
+# Subagentes paralelos em modelo mais barato, sob um planejador Pro
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --subagent-model gemini-3.5-flash-medium "Gere três componentes React independentes: Header, Sidebar e Footer"
+
 # Continuar sessão anterior
 /cc-antigravity-plugin:antigravity --continue "Continue a partir do passo 3 da refatoração anterior"
 
@@ -100,6 +107,8 @@ No Codex, use o agente via:
 | `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por vírgula |
 | `--add-dir <path>` | Adiciona diretório ao workspace nativo do AGY via `--add-dir`; repetível |
 | `--model <name>` | Modelo a usar; escrito em `settings.json` antes do spawn e restaurado após. Ver tabela abaixo. |
+| `--parallel` | Permite que o AGY divida a tarefa entre múltiplos subagentes Gemini nativos (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). O próprio AGY decide quantos subagentes criar com base nas partes independentes da tarefa. |
+| `--subagent-model <name>` | Modelo que os subagentes spawnados devem usar (transmitido via prompt — o AGY não tem flag de CLI por subagente). Ativa `--parallel` automaticamente. Padrão: o mesmo modelo da sessão principal. |
 | `--read-only` | Desativa `--dangerously-skip-permissions` e o auto-add do cwd. Use para análise pura sem modificar arquivos. |
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
 | `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
@@ -139,6 +148,27 @@ No Codex, use o agente via:
 
 O modelo é aplicado escrevendo `settings.json` do AGY antes do spawn e restaurado imediatamente após — sem efeito persistente no AGY.
 
+## Subagentes paralelos (`--parallel`)
+
+O AGY expõe ferramentas nativas de subagentes (`DefineSubagent`, `invoke_subagent` / `Agent`, `ManageSubagents`) que permitem fazer **fan-out de trabalho dentro de uma única sessão `agy`** — sem orquestração na camada do Claude Code.
+
+Com `--parallel`, o bridge anexa um bloco de instruções ao prompt autorizando o AGY a decompor a tarefa em subtarefas independentes e executá-las concorrentemente. O **próprio AGY decide quantos** subagentes criar, aguarda todos terminarem, agrega os resultados e reporta o Conversation ID de cada subagente.
+
+```bash
+# AGY decide a quantidade de subagentes
+/cc-antigravity-plugin:antigravity --parallel "Crie dois relatórios HTML independentes em relatorio/"
+
+# Planejador Pro coordenando subagentes Flash baratos
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --subagent-model gemini-3.5-flash-medium "Gere três componentes independentes"
+```
+
+**Detalhes:**
+- `--subagent-model` ativa `--parallel` automaticamente e é transmitido pelo **texto do prompt** (o AGY não tem flag de CLI por subagente). Sem ele, os subagentes herdam o modelo da sessão principal.
+- Funciona no modo headless padrão (`--print`) — não requer TTY.
+- Ideal para **entregáveis independentes** (vários relatórios, componentes ou arquivos). Para passos sequenciais ou que compartilham estado, mantenha a execução no agente principal.
+- Sem a flag, o prompt fica idêntico ao comportamento padrão — zero impacto nas chamadas existentes.
+- `--parallel` é ignorado quando combinado com `--generate-imagem`.
+
 ## Códigos de saída
 
 O bridge emite um JSON estruturado para orquestradores reagirem a falhas:
@@ -167,11 +197,11 @@ npm test
 ```
 
 ```
-ℹ pass 81
+ℹ pass 94
 ℹ fail 0
 ```
 
-Cobertura: parse de argumentos · coleta de contexto · geração de prompt · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
+Cobertura: parse de argumentos · coleta de contexto · geração de prompt · bloco de paralelismo (`--parallel` / `--subagent-model`) · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
 
 Para exemplos práticos de uso em cenários reais, consulte [`CASOS_USO.md`](CASOS_USO.md) — 11 casos de uso cobrindo análise de arquitetura, refatoração multi-arquivo, geração de documentação, análise de impacto, `--model auto`, heartbeat, sessões contínuas e recuperação de QUOTA_EXAUSTED.
 

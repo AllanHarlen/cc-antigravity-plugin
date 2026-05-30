@@ -1,7 +1,7 @@
 ---
 description: Invoke the Antigravity (AGY) bridge as an agentic coding assistant — creates, edits, and searches files autonomously using AGY's native tools
 allowed-tools: Bash, Glob, Read
-argument-hint: "[--model name] [--generate-image] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
@@ -29,6 +29,8 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 |----------|-------------|---------|
 | `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. AGY has no `--model` CLI flag. Available: `gemini-3.5-flash-low/medium/high`, `gemini-3.1-pro-low/high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`, `gpt-oss-120b-medium`, `nano-banana` | `--model gemini-3.1-pro-low` |
 | `--generate-image` | Generate an image from the task description using AGY's Nano Banana model. Automatically sets `--model nano-banana` unless overridden with `--model`. | `--generate-image` |
+| `--parallel` | Allow AGY to fan the task out across multiple native Gemini subagents. AGY decides how many to spawn based on the task's independent subparts. | `--parallel` |
+| `--subagent-model <name>` | Model the spawned subagents should use (e.g. cheap Flash subagents under a Pro planner). Implies `--parallel`. Defaults to the main model. | `--subagent-model gemini-3.5-flash-medium` |
 | `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs` |
 | `--add-dir <path>` | Add a directory to AGY's native workspace. Repeatable | `--add-dir src` |
 | `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json"` |
@@ -104,6 +106,14 @@ When exit code `10` or `11` is returned, a JSON line is written to stdout:
 ```bash
 /cc-antigravity-plugin:antigravity --continue fix the failing tests from the previous session
 ```
+
+### Parallel subagents (native Gemini fan-out)
+```bash
+/cc-antigravity-plugin:antigravity --parallel --subagent-model gemini-3.5-flash-medium \
+  create two HTML reports in relatorio/: EV taxes and combustion-car taxes in Brazil
+```
+AGY decomposes the task and runs the independent reports concurrently via its native
+subagent tools, then aggregates the results and reports each subagent's conversation ID.
 
 ### Generate an image (Nano Banana model)
 ```bash

@@ -67,6 +67,8 @@ file ingestion, prompt assembly, QUOTA_EXAUSTED detection, and AGY invocation.
 | `--files <glob,...>` | Inline targeted globs and mixed data formats |
 | `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
 | `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. Options: `gemini-3.5-flash-low/medium/high`, `gemini-3.1-pro-low/high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`, `gpt-oss-120b-medium`, `auto` |
+| `--parallel` | Allow AGY to fan the task out across native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`); AGY chooses the count |
+| `--subagent-model <name>` | Model the spawned subagents should use (conveyed via the prompt). Implies `--parallel`; defaults to the main model |
 | `--read-only` | Disable skip-permissions and workspace auto-add |
 | `--continue`, `-c` | Continue the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation |
@@ -106,6 +108,17 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
   "Create relatorio-impostos.html with a full HTML tax report from data/impostos.json."
 ```
+
+### Parallel subagents (native Gemini fan-out)
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --parallel \
+  --subagent-model gemini-3.5-flash-medium \
+  "Create two HTML reports in relatorio/: EV taxes and combustion-car taxes in Brazil."
+```
+
+AGY decomposes independent subparts and runs them concurrently through its native subagent
+tools, then aggregates the outputs. Best for multi-deliverable tasks with independent outputs.
 
 ### Read-only architecture
 
