@@ -55,6 +55,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" [options] -- "<TASK>"
 ```
 
 Guidance:
+- Delegate to AGY when the work is parallelizable — broad research/exploration or multi-file edits — to keep the main conversation responsive; keep trivial single-file edits, quick lookups, or interactive back-and-forth in the main agent (see the antigravity-agent Delegation Decision Workflow).
 - Default invocation is agentic: AGY will create/edit/delete files and run commands.
 - Use `--read-only` when the task is pure analysis and should not modify files.
 - Use `--dirs` to inline broad module slices into the prompt for context.

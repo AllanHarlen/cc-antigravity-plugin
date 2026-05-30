@@ -22,6 +22,19 @@ requires deep codebase understanding, or needs actual file modifications.
 | Documentation generation | Agentic or read-only |
 | Structured data analysis | Read-only (`--read-only`) |
 
+Delegate parallelizable work — research/exploration and multi-file edits — to keep the
+main conversation responsive and development moving fast.
+
+### When NOT to Delegate (keep in the main agent)
+
+- Trivial single-file or single-line edits, or quick lookups.
+- The files and context needed are already loaded in the main conversation.
+- The task needs tight, interactive back-and-forth with the user.
+- It depends on tools AGY lacks, or AGY is unavailable (exit `13`) or blocked (exit `10`/`11`).
+
+**Quick rule:** delegatable + parallelizable (research or multi-file) → delegate to keep
+development fast; small, local, or interactive → handle it in the main agent.
+
 ## Default Behavior
 
 By default, the bridge is **agentic**: `--dangerously-skip-permissions` is forwarded

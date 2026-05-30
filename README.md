@@ -12,6 +12,28 @@ O AGY é um terminal CLI do Google com janela de contexto longa (2M tokens). Est
 - Análise de arquitetura e impacto de mudanças com contexto completo
 - Tarefas que se beneficiam dos modelos Gemini Pro de raciocínio profundo
 
+## Quando delegar para subagentes Antigravity
+
+O plugin segue um workflow simples para decidir quando acionar o subagente Antigravity em
+vez de resolver tudo no agente principal. A ideia é delegar trabalho paralelizável para
+manter a conversa principal responsiva e o desenvolvimento acelerado.
+
+**Delegue para o subagente quando:**
+- pesquisas ou exploração que se espalham por muitos arquivos ou pelo repositório inteiro
+- edições multi-arquivo, refatorações ou geração de código/arquivos em várias camadas
+- análise de longo contexto — arquitetura, auditorias de segurança, impacto de refatoração,
+  análise de dados estruturados (use `--read-only` nesses casos)
+- trabalho em segundo plano ou paralelizável que não precisa do contexto vivo da conversa
+
+**Mantenha no agente principal quando:**
+- edições triviais de um único arquivo/linha ou consultas rápidas
+- os arquivos e o contexto necessários já estão carregados na conversa principal
+- a tarefa exige interação próxima e contínua com o usuário
+- depende de ferramentas que o AGY não tem, ou o AGY está indisponível/bloqueado
+
+> **Regra rápida:** delegável + paralelizável (pesquisa ou multi-arquivo) → delegue para
+> acelerar o desenvolvimento; pequeno, local ou interativo → resolva no agente principal.
+
 ## Pré-requisitos
 
 - **Node.js 18+**

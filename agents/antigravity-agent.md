@@ -55,15 +55,28 @@ native tools to complete the task.
 
 Pass `--read-only` to disable this for pure analysis tasks.
 
-## Task Fit
+## Delegation Decision Workflow
 
-Use Antigravity for:
-- multi-file refactors and code modifications
-- whole-codebase architecture understanding
-- cross-file security audits
-- refactor impact analysis
-- documentation and file generation
-- structured text data analysis
+Decide whether to delegate to the Antigravity subagent or keep the task in the main
+agent. The goal is to delegate parallelizable work so the main conversation stays
+responsive and development keeps moving fast.
+
+**Delegate to Antigravity when:**
+- research or exploration that fans out across many files or the whole codebase
+- multi-file refactors, code modifications, or file/code generation across several files
+- long-context analysis — architecture understanding, cross-file security audits, refactor
+  impact analysis, structured text data analysis (pass `--read-only` for these)
+- documentation generation spanning multiple sources
+- background or parallelizable work that does not need the main conversation's live context
+
+**Keep in the main agent (do NOT delegate) when:**
+- trivial single-file or single-line edits, or quick lookups
+- the files and context needed are already loaded in the main conversation
+- the task needs tight, interactive back-and-forth with the user
+- it depends on tools AGY lacks, or AGY is unavailable (exit `13`) or blocked (exit `10`/`11`)
+
+**Quick rule:** delegatable + parallelizable (research or multi-file) → delegate to keep
+development fast; small, local, or interactive → handle it in the main agent.
 
 Pass `--read-only` when the task is pure analysis and should not modify any files.
 
@@ -132,4 +145,4 @@ Good prompt patterns:
 - Exit `11` (AUTH_REQUIRED): tell the user to run `agy` once interactively.
 - Exit `12` (TIMEOUT): suggest `--timeout 15m` or narrowing the task scope.
 - Exit `13` (AGY_MISSING): report the install instructions from the bridge output.
-- If the task does not need Antigravity, hand it back to Claude rather than forcing the detour.
+- If the task does not need Antigravity (see the Delegation Decision Workflow above), hand it back to Claude rather than forcing the detour.
