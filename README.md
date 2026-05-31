@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="banner.png" alt="cc-antigravity-plugin banner" />
+</p>
+
 # cc-antigravity-plugin
 
 Plugin para Claude Code e Codex que integra o [Antigravity CLI (AGY)](https://antigravity.google) como assistente de codificação agêntico — cria, edita, pesquisa arquivos e executa comandos autonomamente usando os modelos Gemini, Claude e GPT do AGY diretamente no seu workspace.
+
+> **Fork:** Este plugin é um fork do [gemini-cli-plugin](https://github.com/google-gemini/gemini-cli), originalmente criado por [thepushkarp](https://www.linkedin.com/in/thepushkarp) para processos multi-agênticos e multi-harness no Gemini CLI. A arquitetura de orquestração de subagentes (`--parallel`, `DefineSubagent`, `ManageSubagents`) foi adaptada e estendida para o Antigravity CLI com suporte nativo ao Claude Code e ao Codex.
 
 ## Visão Geral
 
