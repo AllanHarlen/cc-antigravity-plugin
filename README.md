@@ -44,16 +44,27 @@ agy --print "what is 2+2"
 
 ### Claude Code (recomendado)
 
+**Via CLI (terminal):**
+
 ```bash
-/plugin marketplace add AllanHarlen/cc-antigravity-plugin
-/reload-plugins
+# Adiciona o repositório GitHub como fonte de marketplace
+claude plugin marketplace add AllanHarlen/cc-antigravity-plugin
+
+# Instala o plugin
+claude plugin install cc-antigravity-plugin@AllanHarlen/cc-antigravity-plugin
 ```
 
-Para testar uma cópia local do repositório:
+**Via slash command (dentro do Claude Code):**
+
+```
+/plugin marketplace add AllanHarlen/cc-antigravity-plugin
+/plugin install cc-antigravity-plugin@AllanHarlen/cc-antigravity-plugin
+```
+
+**Para testar uma cópia local do repositório:**
 
 ```bash
-/plugin install ./
-/reload-plugins
+cc --plugin-dir /path/to/cc-antigravity-plugin
 ```
 
 ### Codex
