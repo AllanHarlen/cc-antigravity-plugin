@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   main,
@@ -291,4 +294,50 @@ test("main default agentic mode includes --dangerously-skip-permissions in agy a
   assert.equal(result, EXIT_SUCCESS);
   assert.match(io.stdout, /--dangerously-skip-permissions/);
   assert.match(io.stdout, /--add-dir/);
+});
+
+// ─── Windows CLI arg limit overflow ───────────────────────────────────────────
+
+test("main Windows prompt overflow: drops inline file content and warns when prompt > 28000 chars", async () => {
+  if (process.platform !== "win32") return;
+
+  // Create a temp dir with a file large enough to push the full prompt past 28_000 chars.
+  // --dirs resolves absolute paths directly so the temp dir is reachable from any cwd.
+  const tmpDir = path.join(os.tmpdir(), `agy-overflow-test-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  const tmpFile = path.join(tmpDir, "large.txt");
+  await fs.writeFile(tmpFile, "A".repeat(28_500));
+
+  try {
+    const io = makeStreams();
+    const calls = [];
+    const result = await main(["analyze this", "--dirs", tmpDir], {
+      ...io,
+      _spawnSync: fakeSpawnSuccess(calls),
+      _loadNodePty: () => null,
+    });
+    assert.equal(result, EXIT_SUCCESS);
+    assert.match(io.stderr, /exceeds Windows CLI limit/);
+
+    // The fallback prompt must not contain the inline file content.
+    const printIdx = calls.at(-1)?.args?.indexOf("--print");
+    assert.ok(printIdx !== undefined && printIdx >= 0, "agy was called with --print");
+    const promptArg = calls.at(-1)?.args?.[printIdx + 1] ?? "";
+    assert.ok(!promptArg.includes("AAAAAAA"), "inline file content must be dropped from fallback prompt");
+    assert.ok(promptArg.length <= 28_000, `fallback prompt must be ≤28000 chars, got ${promptArg.length}`);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test("main Windows prompt overflow: does NOT trigger when prompt is within limit", async () => {
+  if (process.platform !== "win32") return;
+  const io = makeStreams();
+  const result = await main(["short task"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => null,
+  });
+  assert.equal(result, EXIT_SUCCESS);
+  assert.equal(io.stderr, "", "no overflow warning expected for short prompts");
 });

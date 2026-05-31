@@ -1115,7 +1115,7 @@ export async function main(argv = process.argv.slice(2), {
     if (parsed.parallel && parsed.generateImagem) {
       logEvent("bridge.parallel.ignored", { reason: "generate-imagem" });
     }
-    const prompt = parsed.generateImagem
+    let prompt = parsed.generateImagem
       ? buildImagePrompt({ task: parsed.task, context, outputDir: imageOutputDir })
       : buildAntigravityPrompt({
           task: parsed.task,
@@ -1123,6 +1123,32 @@ export async function main(argv = process.argv.slice(2), {
           parallel: parsed.parallel,
           subagentModel: parsed.subagentModel,
         });
+
+    // Windows CreateProcess limit: ~32,767 chars total. Real prompts (with quotes,
+    // backslashes, XML) break at ~29,140 raw chars after Node.js arg encoding.
+    // When exceeded, drop inline file content and let AGY read via --add-dir tools.
+    if (process.platform === "win32" && prompt.length > 28_000 && !parsed.generateImagem) {
+      const fallbackContext = {
+        included: [],
+        skipped: context.included.map((f) => ({ path: f.path, reason: "prompt-overflow-windows" })),
+      };
+      logEvent("bridge.prompt.overflow", {
+        promptLength: prompt.length,
+        limit: 28_000,
+        droppedFiles: context.included.length,
+      });
+      _stderr.write(
+        `Warning: prompt (${prompt.length} chars) exceeds Windows CLI limit. ` +
+          `Dropped ${context.included.length} inline file(s); AGY will read them via --add-dir.\n`,
+      );
+      prompt = buildAntigravityPrompt({
+        task: parsed.task,
+        context: fallbackContext,
+        parallel: parsed.parallel,
+        subagentModel: parsed.subagentModel,
+      });
+    }
+
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
     const agyArgs = buildAntigravityArgs({
       prompt,
