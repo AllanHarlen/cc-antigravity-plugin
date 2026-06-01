@@ -1094,6 +1094,15 @@ export async function main(argv = process.argv.slice(2), {
       return EXIT_SUCCESS;
     }
 
+    // When --parallel is active in a non-TTY context (e.g. Bash tool sandbox), ConPTY output
+    // may be lost: subagents finish quickly and the PTY flush races the sandbox pipe close.
+    // Auto-inject a temp output file so output is captured via a single fsp.writeFile at the end.
+    if (parsed.parallel && !parsed.outputFile && !_isTTY) {
+      const tmpDir = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
+      parsed.outputFile = path.join(tmpDir, `agy-parallel-${Date.now()}.txt`);
+      logEvent("bridge.parallel.auto-output-file", { path: parsed.outputFile });
+    }
+
     const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
     let model = parsed.model ?? (parsed.generateImagem ? "nano-banana" : defaultModel);
     const modelSource = parsed.model ? "flag" : (parsed.generateImagem ? "generate-imagem-default" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"));

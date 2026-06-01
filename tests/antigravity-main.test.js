@@ -341,3 +341,61 @@ test("main Windows prompt overflow: does NOT trigger when prompt is within limit
   assert.equal(result, EXIT_SUCCESS);
   assert.equal(io.stderr, "", "no overflow warning expected for short prompts");
 });
+
+// ─── --parallel auto-output-file in non-TTY context ──────────────────────────
+
+test("main --parallel without --output-file in non-TTY context auto-generates temp output file", async () => {
+  const tmpDir = os.tmpdir();
+  const writtenFiles = [];
+  const io = makeStreams();
+
+  const result = await main(["--parallel", "create two reports"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => fakePtyModule({ exitCode: 0, data: "Report A done.\nReport B done.\n" }),
+    _isTTY: false,
+    _conPtyTimeoutMs: 5_000,
+  });
+
+  assert.equal(result, EXIT_SUCCESS);
+  // stdout must contain the path of the auto-generated temp file
+  const outputPath = io.stdout.trim().split("\n").at(-1);
+  assert.ok(outputPath.startsWith(tmpDir) || outputPath.includes("agy-parallel-"), `expected temp file path in stdout, got: ${outputPath}`);
+  // The file should have been written
+  const content = await fs.readFile(outputPath, "utf8");
+  assert.match(content, /Report/);
+  await fs.unlink(outputPath).catch(() => {});
+});
+
+test("main --parallel with explicit --output-file does NOT auto-generate a second path", async () => {
+  const tmpFile = path.join(os.tmpdir(), `agy-explicit-${Date.now()}.txt`);
+  const io = makeStreams();
+
+  await main(["--parallel", "--output-file", tmpFile, "create two reports"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => fakePtyModule({ exitCode: 0, data: "done\n" }),
+    _isTTY: false,
+    _conPtyTimeoutMs: 5_000,
+  });
+
+  // stdout must be exactly the explicit file path (no extra auto-generated path)
+  assert.equal(io.stdout.trim(), tmpFile);
+  await fs.unlink(tmpFile).catch(() => {});
+});
+
+test("main --parallel in TTY context does NOT auto-generate temp file (streams live)", async () => {
+  const io = makeStreams();
+
+  await main(["--parallel", "create two reports"], {
+    ...io,
+    _spawnSync: fakeSpawnSuccess(),
+    _loadNodePty: () => fakePtyModule({ exitCode: 0, data: "live output\n" }),
+    _isTTY: true,
+    _conPtyTimeoutMs: 5_000,
+  });
+
+  // In TTY mode output is streamed; stdout has live data, not a file path
+  assert.match(io.stdout, /live output/);
+  assert.ok(!io.stdout.includes("agy-parallel-"), "no temp path in live TTY stdout");
+});
