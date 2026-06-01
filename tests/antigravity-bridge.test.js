@@ -53,6 +53,7 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     maxFileBytes: 32768,
     printCommand: false,
     generateImagem: false,
+    outputFile: undefined,
     outputDir: undefined,
     parallel: false,
     subagentModel: undefined,
@@ -156,17 +157,21 @@ test("buildAntigravityPrompt adds the parallelism block when parallel is set", (
   assert.match(prompt, /<parallelism>/);
   assert.match(prompt, /DefineSubagent/);
   assert.match(prompt, /ManageSubagents/);
-  // No subagent model specified → no model-configuration line
+  // No subagent model specified → permissive MAY verb
+  assert.match(prompt, /You MAY decompose/);
   assert.doesNotMatch(prompt, /Configure each subagent to use the model/);
 });
 
-test("buildAntigravityPrompt embeds the resolved subagent model label", () => {
+test("buildAntigravityPrompt uses MUST when subagent-model is specified", () => {
   const prompt = buildAntigravityPrompt({
     task: "Build two independent reports",
     context: { included: [], skipped: [] },
     parallel: true,
     subagentModel: "gemini-3.5-flash-medium",
   });
+  assert.match(prompt, /You MUST decompose/);
+  assert.doesNotMatch(prompt, /You MAY decompose/);
+  assert.match(prompt, /Each independent part of the task MUST be handled by a dedicated subagent/);
   assert.match(prompt, /Configure each subagent to use the model "Gemini 3\.5 Flash \(Medium\)"/);
 });
 

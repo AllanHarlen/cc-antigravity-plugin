@@ -609,12 +609,16 @@ export function buildParallelismBlock({ parallel = false, subagentModel } = {}) 
   const modelLine = subagentModel
     ? `- Configure each subagent to use the model "${agyModelLabel(subagentModel)}".\n`
     : "";
+  const decompositionVerb = subagentModel ? "MUST" : "MAY";
+  const spawnConstraint = subagentModel
+    ? "- Each independent part of the task MUST be handled by a dedicated subagent."
+    : "- Spawn subagents only for genuinely independent work; keep shared or sequential steps in the main agent.";
   return `
 
 <parallelism>
-- You MAY decompose this task into independent subtasks and run them concurrently using your
+- You ${decompositionVerb} decompose this task into independent subtasks and run them concurrently using your
   native subagent tools (DefineSubagent, invoke_subagent / Agent, ManageSubagents).
-- Spawn subagents only for genuinely independent work; keep shared or sequential steps in the main agent.
+${spawnConstraint}
 - Decide the number of subagents yourself based on how many independent subparts the task has.
 ${modelLine}- Wait for every subagent to finish (poll with ManageSubagents) before concluding.
 - Aggregate the subagents' outputs into one final report, and list each subagent's purpose and conversation ID.
