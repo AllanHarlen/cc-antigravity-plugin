@@ -139,6 +139,11 @@ Options:
   --skip-permissions         Explicitly forward --dangerously-skip-permissions (on by default).
   --max-files <n>            Maximum files to inline. Default: 40.
   --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
+  --output-file <path>       Write the full AGY output to a file instead of streaming to
+                             stdout. Only the resolved file path is printed to stdout.
+                             Designed for callers that use the Read tool: pass this flag,
+                             get the path back from the Bash tool, then Read the file.
+                             Immune to sandbox pipe limits and stdout buffering.
   --print-command            Print the resolved agy command and exit.
   -h, --help                 Show this help message.
 
@@ -180,6 +185,7 @@ function summarizeParsedArgs(parsed) {
     maxFileBytes: parsed.maxFileBytes,
     printCommand: parsed.printCommand,
     generateImagem: parsed.generateImagem,
+    outputFile: parsed.outputFile,
     parallel: parsed.parallel,
     subagentModel: parsed.subagentModel,
     help: parsed.help,
@@ -310,6 +316,7 @@ export function parseCliArgs(argv) {
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     printCommand: false,
     generateImagem: false,
+    outputFile: undefined,
     outputDir: undefined,
     parallel: false,
     subagentModel: undefined,
@@ -415,6 +422,10 @@ export function parseCliArgs(argv) {
       case "--subagent-model":
         parsed.subagentModel = takeOptionValue(argv, index, token);
         parsed.parallel = true;   // a subagent model is meaningless without fan-out
+        index += 1;
+        break;
+      case "--output-file":
+        parsed.outputFile = takeOptionValue(argv, index, token);
         index += 1;
         break;
       case "--output-dir":
@@ -1202,6 +1213,9 @@ export async function main(argv = process.argv.slice(2), {
 
       if (ptyModule) {
         const outputChunks = [];
+        // When --output-file is set, suppress streaming to stdout; a single write at
+        // the end is immune to sandbox pipe limits and stdout buffering.
+        const ptyOutputStream = parsed.outputFile ? { write: () => {} } : _stdout;
         let ptyExitCode;
         try {
           ptyExitCode = await spawnViaConPty(
@@ -1209,7 +1223,7 @@ export async function main(argv = process.argv.slice(2), {
             agyArgs,
             ptyModule,
             timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
-            _stdout,
+            ptyOutputStream,
             outputChunks,
           );
         } catch (err) {
@@ -1219,6 +1233,13 @@ export async function main(argv = process.argv.slice(2), {
           throw err;
         }
         const fullOutput = outputChunks.join("");
+        if (parsed.outputFile) {
+          const resolvedOutputFile = path.resolve(parsed.outputFile);
+          await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
+          await fsp.writeFile(resolvedOutputFile, fullOutput, "utf8");
+          logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: fullOutput.length });
+          _stdout.write(resolvedOutputFile + "\n");
+        }
         const sig = classifyAgyOutput(fullOutput);
         if (sig) {
           emitStructuredSignal(sig.type, sig.reason, model, _stdout);
@@ -1232,7 +1253,8 @@ export async function main(argv = process.argv.slice(2), {
 
       // Fallback for platforms or installs where node-pty is unavailable.
       logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
-      const result = _spawnSync(agyExe, agyArgs, { stdio: "inherit" });
+      const spawnStdio = parsed.outputFile ? "pipe" : "inherit";
+      const result = _spawnSync(agyExe, agyArgs, { stdio: spawnStdio, encoding: "utf8" });
       if (result.error) {
         logEvent("agy.spawnsync.error", {
           code: result.error.code,
@@ -1242,6 +1264,14 @@ export async function main(argv = process.argv.slice(2), {
           throw buildAgyMissingError();
         }
         throw result.error;
+      }
+      if (parsed.outputFile) {
+        const resolvedOutputFile = path.resolve(parsed.outputFile);
+        const capturedOutput = stripAnsi((result.stdout ?? "") + (result.stderr ?? ""));
+        await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
+        await fsp.writeFile(resolvedOutputFile, capturedOutput, "utf8");
+        logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: capturedOutput.length });
+        _stdout.write(resolvedOutputFile + "\n");
       }
       logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
       if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);

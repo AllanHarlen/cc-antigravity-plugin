@@ -83,46 +83,77 @@ AGY fans the work out across native Gemini subagents and aggregates the results.
 4. Add optional flags only when they help: `--model`, `--continue`, `--conversation`,
    `--timeout`, `--interactive`, `--sandbox`.
 5. Use `--read-only` to disable agentic mode for analysis-only tasks.
-6. Execute one bridge command and return the findings clearly.
+6. Always pass `--output-file <tmp-path>` and use the `Read` tool to retrieve the output
+   (see Output Retrieval below — this is required, not optional).
 7. If exit code is `10` (QUOTA_EXAUSTED), report the structured signal and suggest retry.
 8. If exit code is `11` (AUTH_REQUIRED), tell the user to run `agy` interactively.
+
+## Output Retrieval (required)
+
+The Bash tool captures stdout via a sandbox pipe that cannot handle AGY's async ConPTY
+output. Always use `--output-file` so the bridge writes the full output to a file, then
+retrieve it with the `Read` tool. This is the native, lossless channel.
+
+Pattern:
+```bash
+# Step 1 — run the bridge; stdout will be just the output file path
+OUT=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$-$(date +%s).txt" \
+  [other flags] -- "<TASK>")
+echo "EXIT:$?"
+echo "FILE:$OUT"
+```
+
+Then use `Read` on the path printed by the bridge (the value of `$OUT` / `FILE:...`).
+The file contains the complete, untruncated AGY response.
+
+Temp path by platform:
+- Unix/macOS: `/tmp/agy-$$.txt` or `$(mktemp /tmp/agy-XXXXXX.txt)`
+- Windows (Git Bash / Bash tool): `"${TEMP}/agy-$$.txt"` or `"${TMPDIR:-/tmp}/agy-$$.txt"`
 
 ## Command Patterns
 
 Basic (agentic, creates/edits files):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$.txt" -- "<TASK>"
 ```
 
 With inline context:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --dirs src,docs -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$.txt" --dirs src,docs -- "<TASK>"
 ```
 
 Read-only analysis:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --read-only --dirs src -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$.txt" --read-only --dirs src -- "<TASK>"
 ```
 
 Additional workspace directories:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --add-dir src -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$.txt" --add-dir src -- "<TASK>"
 ```
 
 Parallel subagents (independent deliverables):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --parallel --subagent-model gemini-3.5-flash-medium -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$.txt" \
+  --parallel --subagent-model gemini-3.5-flash-medium -- "<TASK>"
 ```
 
 Continue previous session:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" --continue -- "<TASK>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --output-file "/tmp/agy-$$.txt" --continue -- "<TASK>"
 ```
 
 ## Prompting Guidance
