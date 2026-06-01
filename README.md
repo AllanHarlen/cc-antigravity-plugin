@@ -19,6 +19,25 @@ O AGY é um terminal CLI do Google com janela de contexto longa (2M tokens). Est
 - Tarefas que se beneficiam dos modelos Gemini Pro de raciocínio profundo
 - Tarefas com múltiplos entregáveis independentes que podem rodar em paralelo via subagentes Gemini nativos (`--parallel`)
 
+### Claude invocando `agy` diretamente vs via plugin
+
+O Claude pode chamar `agy` diretamente via Bash (`agy --print "task" --dangerously-skip-permissions --add-dir .`) sem nenhuma camada intermediária. O plugin, porém, entrega capacidades que o `agy` puro não tem:
+
+| Capacidade | `agy` direto | Via plugin (bridge) |
+|---|---|---|
+| Seleção de modelo headless | Impossível — sem flag `--model` | Sim, via patch de `settings.json` |
+| Comportamento de coding agent garantido | Não — AGY tende a responder texto | Sim — bloco `<constraints>` instrui uso de `write_to_file`, `grep_search`, etc. |
+| Sinais estruturados de quota/auth | Não — texto livre, sem exit code | Exit codes 10/11 + JSON linha parseable |
+| Ingestão automática de arquivos | Manual | `--dirs`, `--files` com detecção binária e truncamento |
+| Parallelismo via subagentes Gemini | Manual | `--parallel` + `--subagent-model` |
+| Fallback do limite de 28k chars (Windows) | Quebra silencioso | Drop automático de arquivos inline |
+| Logging auditável | Não | JSONL em `%LOCALAPPDATA%\agy\cc-plugin-logs\` |
+| Overhead de processo | Nenhum | Node.js + ConPTY + check de versão |
+| Visibilidade das ações do AGY | Total — output direto | Caixa preta — Claude não valida antes de executar |
+| Dependência de quota | Só Claude | Claude + AGY/Gemini |
+
+**Resumo:** para workflows automatizados, skills e tarefas de codificação onde o comportamento agêntico consistente é necessário, o bridge é a escolha correta. Para invocações ad-hoc simples sem necessidade de modelo específico ou orquestração, o `agy` direto funciona com menos overhead.
+
 ## Pré-requisitos
 
 - **Node.js 18+**
