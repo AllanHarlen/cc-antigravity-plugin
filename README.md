@@ -4,44 +4,47 @@
 
 # cc-antigravity-plugin
 
-Plugin para Claude Code e Codex que integra o [Antigravity CLI (AGY)](https://antigravity.google) como assistente de codificação agêntico — cria, edita, pesquisa arquivos e executa comandos autonomamente usando os modelos Gemini, Claude e GPT do AGY diretamente no seu workspace.
+A plugin for Claude Code and Codex that integrates the [Antigravity CLI (AGY)](https://antigravity.google) as an agentic coding assistant — creates, edits, searches files, and executes commands autonomously over your codebase.
 
-> **Fork:** Este plugin é um fork do [gemini-cli-plugin](https://github.com/google-gemini/gemini-cli), originalmente criado por [thepushkarp](https://www.linkedin.com/in/thepushkarp) para processos multi-agênticos e multi-harness no Gemini CLI. A arquitetura de orquestração de subagentes (`--parallel`, `DefineSubagent`, `ManageSubagents`) foi adaptada e estendida para o Antigravity CLI com suporte nativo ao Claude Code e ao Codex.
+📖 **Documentation in other languages:**
+- [Português (Brazilian Portuguese)](./README.pt-BR.md)
 
-## Visão Geral
+> **Fork:** This plugin is a fork of [gemini-cli-plugin](https://github.com/google-gemini/gemini-cli), originally created by [thepushkarp](https://www.linkedin.com/in/thepushkarp) for process automation with Gemini CLI.
 
-O AGY é um terminal CLI do Google com janela de contexto longa (2M tokens). Este plugin conecta o AGY ao Claude Code e ao Codex por meio de um bridge Node.js compartilhado, expondo o AGY como um subagente que **completa tarefas de codificação de ponta a ponta**.
+## Overview
 
-**Quando usar em vez do Claude Code nativo:**
-- Refatorações multi-arquivo que precisam de contexto amplo do repositório
-- Geração de código que atravessa várias camadas do projeto
-- Análise de arquitetura e impacto de mudanças com contexto completo
-- Tarefas que se beneficiam dos modelos Gemini Pro de raciocínio profundo
-- Tarefas com múltiplos entregáveis independentes que podem rodar em paralelo via subagentes Gemini nativos (`--parallel`)
+AGY is Google's long-context CLI terminal (2M token window). This plugin bridges AGY to Claude Code and Codex via a shared Node.js bridge, exposing AGY as a [tool_use](https://www.anthropic.com/research/tool-use) endpoint that Claude can invoke.
 
-### Claude invocando `agy` diretamente vs via plugin
+**When to use instead of native Claude Code:**
+- Multi-file refactorings needing broad repository context
+- Code generation spanning multiple project layers
+- Architecture analysis and change impact with complete context
+- Tasks benefiting from Gemini Pro deep-reasoning models
+- Multiple independent deliverables that can run in parallel via native Gemini subagents (`--parallel`)
 
-O Claude pode chamar `agy` diretamente via Bash (`agy --print "task" --dangerously-skip-permissions --add-dir .`) sem nenhuma camada intermediária. O plugin, porém, entrega capacidades que o `agy` puro não tem:
+### Claude invoking `agy` directly vs via plugin
 
-| Capacidade | `agy` direto | Via plugin (bridge) |
+Claude can call `agy` directly via Bash (`agy --print "task" --dangerously-skip-permissions --add-dir .`) without any intermediary. However, the plugin delivers capabilities that raw `agy` cannot:
+
+| Capability | `agy` direct | Via plugin (bridge) |
 |---|---|---|
-| Seleção de modelo headless | Impossível — sem flag `--model` | Sim, via patch de `settings.json` |
-| Comportamento de coding agent garantido | Não — AGY tende a responder texto | Sim — bloco `<constraints>` instrui uso de `write_to_file`, `grep_search`, etc. |
-| Sinais estruturados de quota/auth | Não — texto livre, sem exit code | Exit codes 10/11 + JSON linha parseable |
-| Ingestão automática de arquivos | Manual | `--dirs`, `--files` com detecção binária e truncamento |
-| Parallelismo via subagentes Gemini | Manual | `--parallel` + `--subagent-model` |
-| Fallback do limite de 28k chars (Windows) | Quebra silencioso | Drop automático de arquivos inline |
-| Logging auditável | Não | JSONL em `%LOCALAPPDATA%\agy\cc-plugin-logs\` |
-| Overhead de processo | Nenhum | Node.js + ConPTY + check de versão |
-| Visibilidade das ações do AGY | Total — output direto | Caixa preta — Claude não valida antes de executar |
-| Dependência de quota | Só Claude | Claude + AGY/Gemini |
+| Headless model selection | No — lacks `--model` flag | Yes, via `settings.json` patch |
+| Guaranteed coding-agent behavior | No — AGY tends to respond in text | Yes — `<constraints>` block instructs use of `write_to_file`, `grep_search`, etc. |
+| Structured quota/auth signals | No — free-form text, no exit codes | Exit codes 10/11 + JSON-line parseable |
+| Automatic file ingestion | Manual | `--dirs`, `--files` with binary detection and truncation |
+| Parallelism via Gemini subagents | Manual | `--parallel` + `--subagent-model` |
+| Fallback for 28k char limit (Windows) | Silent breakage | Auto-drop of inline files |
+| Auditable logging | No | JSONL in `%LOCALAPPDATA%\agy\cc-plugin-logs\` |
+| Process overhead | None | Node.js + ConPTY + version check |
+| Visibility of AGY actions | Full — direct output | Black box — Claude doesn't validate before exec |
+| Quota dependency | Claude only | Claude + AGY/Gemini |
 
-**Resumo:** para workflows automatizados, skills e tarefas de codificação onde o comportamento agêntico consistente é necessário, o bridge é a escolha correta. Para invocações ad-hoc simples sem necessidade de modelo específico ou orquestração, o `agy` direto funciona com menos overhead.
+**Summary:** for automated workflows, skills, and coding tasks where consistent agentic behavior is required, the bridge is the right choice. For simple ad-hoc invocations, raw `agy` suffices.
 
-## Pré-requisitos
+## Prerequisites
 
 - **Node.js 18+**
-- **Antigravity CLI** instalado e autenticado
+- **Antigravity CLI** installed and authenticated
 
 ```bash
 # macOS / Linux
@@ -51,36 +54,36 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 irm https://antigravity.google/cli/install.ps1 | iex
 ```
 
-Após instalar, rode `agy` uma vez para fazer login e confirme que está funcionando:
+After installing, run `agy` once to log in and verify it works:
 
 ```bash
 agy --print "what is 2+2"
 ```
 
-> O hook `SessionStart` verifica automaticamente se o AGY está instalado e acessível a cada início de sessão do Claude Code.
+> The `SessionStart` hook automatically checks if AGY is installed and accessible on each Claude Code session start.
 
-## Instalação
+## Installation
 
-### Claude Code (recomendado)
+### Claude Code (recommended)
 
 **Via CLI (terminal):**
 
 ```bash
-# Adiciona o repositório GitHub como fonte de marketplace
+# Add the GitHub repository as a marketplace source
 claude plugin marketplace add AllanHarlen/cc-antigravity-plugin
 
-# Instala o plugin
+# Install the plugin
 claude plugin install cc-antigravity-plugin@AllanHarlen/cc-antigravity-plugin
 ```
 
-**Via slash command (dentro do Claude Code):**
+**Via slash command (inside Claude Code):**
 
 ```
 /plugin marketplace add AllanHarlen/cc-antigravity-plugin
 /plugin install cc-antigravity-plugin@AllanHarlen/cc-antigravity-plugin
 ```
 
-**Para testar uma cópia local do repositório:**
+**To test a local copy of the repository:**
 
 ```bash
 cc --plugin-dir /path/to/cc-antigravity-plugin
@@ -93,140 +96,140 @@ git clone https://github.com/AllanHarlen/cc-antigravity-plugin.git \
   ~/.agents/skills/cc-antigravity-plugin
 ```
 
-Reinicie o Codex após clonar.
+Restart Codex after cloning.
 
-## Uso
+## Usage
 
 ```bash
-# Tarefa agêntica — padrão, cria e edita arquivos no workspace
-/cc-antigravity-plugin:antigravity "Refatore o módulo auth para async/await e atualize todos os callers"
+# Agentic task — default, creates and edits files in workspace
+/cc-antigravity-plugin:antigravity "Refactor the auth module for async/await and update all callers"
 
-# Com contexto inline de diretórios
-/cc-antigravity-plugin:antigravity --dirs src,docs "Explique a arquitetura e cite os arquivos-chave"
+# With inline directory context
+/cc-antigravity-plugin:antigravity --dirs src,docs "Explain the architecture and cite key files"
 
-# Somente análise, sem modificar arquivos
-/cc-antigravity-plugin:antigravity --read-only --dirs src "Analise o impacto de remover o módulo de cache"
+# Analysis only, no file modifications
+/cc-antigravity-plugin:antigravity --read-only --dirs src "Analyze the impact of removing the cache module"
 
-# Modelo específico
-/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low "Projete o schema do banco para o módulo X"
+# Specific model
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low "Design the database schema for module X"
 
-# Modelo automático (selecionado pelo tamanho do contexto inline)
-/cc-antigravity-plugin:antigravity --model auto --dirs src "Refatore os controllers"
+# Auto model (selected by inline context size)
+/cc-antigravity-plugin:antigravity --model auto --dirs src "Refactor the controllers"
 
-# Subagentes paralelos — AGY divide a tarefa em subagentes Gemini nativos e concorrentes
-/cc-antigravity-plugin:antigravity --parallel "Crie dois relatórios HTML em relatorio/: impostos em carros elétricos e em carros a combustão no Brasil"
+# Parallel subagents — AGY splits task into native concurrent Gemini subagents
+/cc-antigravity-plugin:antigravity --parallel "Create two HTML reports in reports/: electric vehicle taxes and ICE vehicle taxes in Brazil"
 
-# Subagentes paralelos em modelo mais barato, sob um planejador Pro
-/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --subagent-model gemini-3.5-flash-medium "Gere três componentes React independentes: Header, Sidebar e Footer"
+# Parallel subagents in cheaper model, under a Pro orchestrator
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --subagent-model gemini-3.5-flash-medium "Generate three independent React components: Header, Sidebar, and Footer"
 
-# Continuar sessão anterior
-/cc-antigravity-plugin:antigravity --continue "Continue a partir do passo 3 da refatoração anterior"
+# Resume previous session
+/cc-antigravity-plugin:antigravity --continue "Continue from step 3 of the previous refactoring"
 
-# Geração de imagem com Nano Banana
-/cc-antigravity-plugin:antigravity --generate-imagem "um skyline futurista ao pôr do sol, estilo cyberpunk, tons de roxo e laranja"
+# Image generation with Nano Banana
+/cc-antigravity-plugin:antigravity --generate-image "a futuristic skyline at sunset, cyberpunk style, purple and orange tones"
 
-# Com contexto de estilo e diretório de destino
-/cc-antigravity-plugin:antigravity --generate-imagem --files "brand/style.json" --output-dir ./assets "logotipo seguindo o guia de identidade visual"
+# With style context and destination directory
+/cc-antigravity-plugin:antigravity --generate-image --files "brand/style.json" --output-dir ./assets "logo following the visual identity guide"
 ```
 
-No Codex, use o agente via:
+In Codex, use the agent via:
 
 ```text
-@antigravity-agent <tarefa>
+@antigravity-agent <task>
 ```
 
-## Opções
+## Options
 
-| Opção | Descrição |
+| Option | Description |
 |---|---|
-| `--dirs <path,...>` | Injeta diretórios recursivamente como contexto inline no prompt |
-| `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por vírgula |
-| `--add-dir <path>` | Adiciona diretório ao workspace nativo do AGY via `--add-dir`; repetível |
-| `--model <name>` | Modelo a usar; escrito em `settings.json` antes do spawn e restaurado após. Ver tabela abaixo. |
-| `--parallel` | Permite que o AGY divida a tarefa entre múltiplos subagentes Gemini nativos (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). O próprio AGY decide quantos subagentes criar com base nas partes independentes da tarefa. |
-| `--subagent-model <name>` | Modelo que os subagentes spawnados devem usar (transmitido via prompt — o AGY não tem flag de CLI por subagente). Ativa `--parallel` automaticamente. Padrão: o mesmo modelo da sessão principal. |
-| `--read-only` | Desativa `--dangerously-skip-permissions` e o auto-add do cwd. Use para análise pura sem modificar arquivos. |
-| `--continue`, `-c` | Continua a conversa mais recente do AGY |
-| `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
-| `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
-| `--interactive`, `--agent` | Usa `--prompt-interactive` para sessão interativa (requer TTY) |
-| `--sandbox` | Ativa o modo sandbox do AGY |
-| `--max-files <n>` | Número máximo de arquivos injetados no contexto inline. Padrão: `40` |
-| `--max-file-bytes <n>` | Número máximo de bytes por arquivo. Padrão: `32768` |
-| `--generate-imagem`, `--generate-image` | Gera uma imagem a partir da descrição no task usando o modelo Nano Banana. Define `--model nano-banana` automaticamente. |
-| `--output-dir <path>` | Diretório onde as imagens geradas são salvas. Padrão: diretório atual. |
-| `--print-command` | Imprime o comando `agy` resolvido sem executar |
+| `--dirs <path,...>` | Recursively inject directories as inline context in the prompt |
+| `--files <glob,...>` | Inject files matching comma-separated globs |
+| `--add-dir <path>` | Add directory to AGY's native workspace via `--add-dir`; repeatable |
+| `--model <name>` | Model to use; written to `settings.json` before spawn and restored after. See table below. |
+| `--parallel` | Allow AGY to split the task among multiple native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). AGY decides how many. Requires TTY or prompt injection. |
+| `--subagent-model <name>` | Model for spawned subagents (passed via prompt — AGY has no per-subagent CLI flag). Enables `--parallel` automatically. Default: model of main session. |
+| `--read-only` | Disables `--dangerously-skip-permissions` and auto-add of cwd. Use for pure analysis without modifying files. |
+| `--continue`, `-c` | Resume the most recent AGY conversation |
+| `--conversation <id>` | Resume a specific AGY conversation by ID |
+| `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |
+| `--interactive`, `--agent` | Use `--prompt-interactive` for interactive session (requires TTY) |
+| `--sandbox` | Enable AGY sandbox mode |
+| `--max-files <n>` | Maximum files injected as inline context. Default: `40` |
+| `--max-file-bytes <n>` | Maximum bytes per file. Default: `32768` |
+| `--generate-image`, `--generate-imagem` | Generate an image from the description in task using Nano Banana model. Sets `--model nano-banana` automatically. |
+| `--output-dir <path>` | Directory where generated images are saved. Default: current directory. |
+| `--print-command` | Print the resolved `agy` command without executing |
 
-**Padrões agênticos:** por padrão, `--dangerously-skip-permissions` é repassado e o cwd é adicionado ao workspace do AGY via `--add-dir`. Use `--read-only` para desativar.
+**Agentic defaults:** by default, `--dangerously-skip-permissions` is passed and cwd is added to AGY's workspace via `--add-dir`. Use `--read-only` to disable.
 
-## Modelos disponíveis
+## Available Models
 
-| Identificador | Indicado para |
+| Identifier | Recommended for |
 |---|---|
-| `gemini-3.5-flash-medium` | **Padrão** — maioria das tarefas |
-| `gemini-3.5-flash-low` | Tarefas simples, resposta mais rápida |
-| `gemini-3.5-flash-high` | Flash com mais esforço de raciocínio |
-| `gemini-3.1-pro-low` | Raciocínio mais profundo |
-| `gemini-3.1-pro-high` | Raciocínio máximo |
-| `claude-4.6-sonnet-thinking` | Tarefas complexas com Claude |
-| `claude-4.6-opus-thinking` | Máxima capacidade |
-| `gpt-oss-120b-medium` | Alternativa GPT |
-| `nano-banana` | Geração de imagem (usado por `--generate-imagem`) |
-| `auto` | Seleciona automaticamente pelo tamanho do contexto inline |
+| `gemini-3.5-flash-medium` | **Default** — most tasks |
+| `gemini-3.5-flash-low` | Simple tasks, faster response |
+| `gemini-3.5-flash-high` | Flash with more reasoning effort |
+| `gemini-3.1-pro-low` | Deeper reasoning |
+| `gemini-3.1-pro-high` | Maximum reasoning |
+| `claude-4.6-sonnet-thinking` | Complex tasks with Claude |
+| `claude-4.6-opus-thinking` | Maximum capacity |
+| `gpt-oss-120b-medium` | Alternative GPT |
+| `nano-banana` | Image generation (used by `--generate-image`) |
+| `auto` | Auto-select by inline context size |
 
-**`--model auto` — limiares:**
+**`--model auto` — thresholds:**
 
-| Contexto inline total | Modelo selecionado |
+| Total inline context | Selected model |
 |---|---|
 | < 32 KB | `gemini-3.5-flash-low` |
 | 32 KB – 256 KB | `gemini-3.5-flash-medium` |
 | ≥ 256 KB | `gemini-3.5-flash-high` |
 
-O modelo é aplicado escrevendo `settings.json` do AGY antes do spawn e restaurado imediatamente após — sem efeito persistente no AGY.
+The model is applied by writing AGY's `settings.json` before spawn and restored immediately after — no persistent effect on AGY.
 
-## Subagentes paralelos (`--parallel`)
+## Parallel Subagents (`--parallel`)
 
-O AGY expõe ferramentas nativas de subagentes (`DefineSubagent`, `invoke_subagent` / `Agent`, `ManageSubagents`) que permitem fazer **fan-out de trabalho dentro de uma única sessão `agy`** — sem orquestração na camada do Claude Code.
+AGY exposes native subagent tools (`DefineSubagent`, `invoke_subagent` / `Agent`, `ManageSubagents`) that allow you to **fan-out work within a single `agy` session** — multiple independent tasks run concurrently under a single model context.
 
-Com `--parallel`, o bridge anexa um bloco de instruções ao prompt autorizando o AGY a decompor a tarefa em subtarefas independentes e executá-las concorrentemente. O **próprio AGY decide quantos** subagentes criar, aguarda todos terminarem, agrega os resultados e reporta o Conversation ID de cada subagente.
+With `--parallel`, the bridge attaches an instruction block to the prompt authorizing AGY to decompose the task into independent subtasks and execute them concurrently. **AGY itself decides how many subagents to spawn** (subject to rate limits).
 
 ```bash
-# AGY decide a quantidade de subagentes
-/cc-antigravity-plugin:antigravity --parallel "Crie dois relatórios HTML independentes em relatorio/"
+# AGY decides the number of subagents
+/cc-antigravity-plugin:antigravity --parallel "Create two independent HTML reports in reports/"
 
-# Planejador Pro coordenando subagentes Flash baratos
-/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --subagent-model gemini-3.5-flash-medium "Gere três componentes independentes"
+# Pro orchestrator coordinating cheap Flash subagents
+/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low --subagent-model gemini-3.5-flash-medium "Generate three independent components"
 ```
 
-**Detalhes:**
-- `--subagent-model` ativa `--parallel` automaticamente e é transmitido pelo **texto do prompt** (o AGY não tem flag de CLI por subagente). Sem ele, os subagentes herdam o modelo da sessão principal.
-- Funciona no modo headless padrão (`--print`) — não requer TTY.
-- Ideal para **entregáveis independentes** (vários relatórios, componentes ou arquivos). Para passos sequenciais ou que compartilham estado, mantenha a execução no agente principal.
-- Sem a flag, o prompt fica idêntico ao comportamento padrão — zero impacto nas chamadas existentes.
-- `--parallel` é ignorado quando combinado com `--generate-imagem`.
+**Details:**
+- `--subagent-model` enables `--parallel` automatically and is transmitted via **prompt text** (AGY has no per-subagent CLI flag). Without it, subagents inherit the session model.
+- Works in default headless mode (`--print`) — no TTY required.
+- Ideal for **independent deliverables** (multiple reports, components, or files). For sequential steps or state-sharing, keep execution on the main agent.
+- Without the flag, the prompt remains identical to default behavior — zero impact on existing calls.
+- `--parallel` is ignored when combined with `--generate-image`.
 
-## Códigos de saída
+## Exit Codes
 
-O bridge emite um JSON estruturado para orquestradores reagirem a falhas:
+The bridge emits structured JSON for orchestrators to react to failures:
 
 ```json
 {"status":"QUOTA_EXAUSTED","reason":"...","model":"gemini-3.5-flash-medium","retry":"--continue"}
 ```
 
-O campo `retry` indica como retomar: passe `--continue` na próxima chamada para retomar a sessão interrompida.
+The `retry` field indicates how to resume: pass `--continue` on the next call to resume the interrupted session.
 
-| Código | Significado | Ação |
+| Code | Meaning | Action |
 |---|---|---|
-| `0` | Sucesso | — |
-| `1` | Erro genérico | Verifique o log |
-| `10` | `QUOTA_EXAUSTED` | Aguarde reset; use `--continue` para retomar |
-| `11` | `AUTH_REQUIRED` | Execute `agy` uma vez interativamente |
-| `12` | `TIMEOUT` | Aumente `--timeout` ou reduza o escopo |
-| `13` | `AGY_MISSING` | Instale o AGY |
+| `0` | Success | — |
+| `1` | Generic error | Check the log |
+| `10` | `QUOTA_EXAUSTED` | Wait for reset; use `--continue` to resume |
+| `11` | `AUTH_REQUIRED` | Run `agy` interactively once |
+| `12` | `TIMEOUT` | Increase `--timeout` or reduce scope |
+| `13` | `AGY_MISSING` | Install AGY |
 
-> **Heartbeat:** o timer de timeout reseta a cada chunk de output do AGY. Tarefas longas que produzem output contínuo não são canceladas — o timeout só dispara se o AGY ficar completamente silencioso por `timeoutMs`.
+> **Heartbeat:** the timeout timer resets on each chunk of AGY output. Long-running tasks that produce continuous output are not cancelled — the timeout only fires if AGY becomes completely silent for the specified duration.
 
-## Testes
+## Tests
 
 ```bash
 npm test
@@ -237,41 +240,41 @@ npm test
 ℹ fail 0
 ```
 
-Cobertura: parse de argumentos · coleta de contexto · geração de prompt · bloco de paralelismo (`--parallel` / `--subagent-model`) · spawn via ConPTY · heartbeat de timeout · detecção de QUOTA_EXAUSTED/AUTH_REQUIRED · model forwarding via settings.json · `--model auto` · encoding error handling.
+Coverage: argument parsing · context collection · prompt generation · parallelism block (`--parallel` / `--subagent-model`) · ConPTY spawn · timeout heartbeat · encoding detection · model selection · exit codes.
 
-Para exemplos práticos de uso em cenários reais, consulte [`CASOS_USO.md`](CASOS_USO.md) — 11 casos de uso cobrindo análise de arquitetura, refatoração multi-arquivo, geração de documentação, análise de impacto, `--model auto`, heartbeat, sessões contínuas e recuperação de QUOTA_EXAUSTED.
+For practical usage examples in real scenarios, see [`CASOS_USO.md`](CASOS_USO.md) — 11 use cases covering architecture analysis, multi-file refactoring, documentation generation, and parallel task decomposition.
 
-## Desenvolvimento
+## Development
 
-### Variáveis de ambiente
+### Environment Variables
 
-| Variável | Descrição |
+| Variable | Description |
 |---|---|
-| `CC_ANTIGRAVITY_LOG_PATH` | Caminho customizado para o arquivo de log JSONL |
-| `CC_ANTIGRAVITY_LOG_OUTPUT` | Defina como `1` para incluir o output do AGY nos logs |
+| `CC_ANTIGRAVITY_LOG_PATH` | Custom path for the JSONL log file |
+| `CC_ANTIGRAVITY_LOG_OUTPUT` | Set to `1` to include AGY output in logs |
 
-Log padrão: `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (Windows) ou `~/.local/share/agy/cc-plugin-logs/` (Linux/macOS).
+Default log: `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (Windows) or `~/.local/share/agy/cc-plugin-logs/` (Linux/macOS).
 
-### Teste local com logs em tempo real (Windows)
+### Local testing with real-time logs (Windows)
 
 ```powershell
 .\scripts\run-claude-plugin-dev.ps1
 ```
 
-O script define `CC_ANTIGRAVITY_LOG_PATH` para a sessão e abre uma segunda janela com `Get-Content -Wait` no log.
+The script sets `CC_ANTIGRAVITY_LOG_PATH` for the session and opens a second window with `Get-Content -Wait` on the log.
 
-## Solução de Problemas
+## Troubleshooting
 
-| Problema | Solução |
+| Problem | Solution |
 |---|---|
-| Erro de autenticação | Rode `agy` interativamente e faça login. |
-| `agy` não encontrado | Rode o instalador do AGY e confirme que o binário está no PATH. |
-| Modelo não muda | Verifique se `%LOCALAPPDATA%\agy\settings.json` (Win) ou `~/.config/agy/settings.json` (Linux) é lido pelo AGY. Confirme com T02 do `MANUAL_TESTS.md`. |
-| Pressão de tokens | Reduza `--dirs`, restrinja `--files` ou diminua `--max-files`. |
-| Timeout prematuro | Aumente `--timeout`. Com heartbeat ativo, o timer reseta a cada output — verifique se o AGY está produzindo output. |
-| Plugin não carregado | Rode `/reload-plugins` ou reinicie o Claude Code. |
-| Arquivo com encoding errado ignorado | Arquivos não-UTF-8 (ex: Windows-1252) são pulados com `encoding-error`. Re-salve em UTF-8. |
+| Authentication error | Run `agy` interactively and log in. |
+| `agy` not found | Run the AGY installer and confirm the binary is in PATH. |
+| Model not changing | Verify `%LOCALAPPDATA%\agy\settings.json` (Win) or `~/.config/agy/settings.json` (Linux) is read by AGY. Confirm via T02 in `MANUAL_TESTS.md`. |
+| Token pressure | Reduce `--dirs`, restrict `--files`, or lower `--max-files`. |
+| Premature timeout | Increase `--timeout`. With heartbeat active, timer resets per output — verify AGY is producing output. |
+| Plugin not loaded | Run `/reload-plugins` or restart Claude Code. |
+| Wrong encoding file skipped | Non-UTF-8 files (e.g., Windows-1252) are skipped with `encoding-error`. Re-save as UTF-8. |
 
-## Licença
+## License
 
 [MIT](LICENSE)
