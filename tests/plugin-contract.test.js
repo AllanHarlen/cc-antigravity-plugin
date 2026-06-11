@@ -28,11 +28,16 @@ test("coding entry points restrict Bash to the bridge", async () => {
 
 test("documentation routes coding away from antigravity-agent", async () => {
   const readme = await read("README.md");
+  const readmePtBr = await read("README.pt-BR.md");
   const skill = await read("skills/SKILL.md");
   const useCases = await read("CASOS_USO.md");
 
-  assert.match(readme, /Não use `antigravity-agent` para coding/);
-  assert.doesNotMatch(readme, /@antigravity-agent <tarefa>/);
+  assert.match(readme, /Do not use `antigravity-agent` for coding/);
+  assert.match(readme, /In Codex, use the skill/);
+  assert.doesNotMatch(readme, /@antigravity-agent <task>/);
+  assert.match(readmePtBr, /Não use `antigravity-agent` para coding/);
+  assert.match(readmePtBr, /No Codex, use o skill/);
+  assert.doesNotMatch(readmePtBr, /@antigravity-agent <tarefa>/);
   assert.match(skill, /Do not spawn\s+`antigravity-agent` for work that creates/i);
   assert.match(useCases, /UC13.*MonoRepo/s);
   assert.match(useCases, /\/cc-antigravity-plugin:antigravity --parallel --add-dir \.\/frontend/);

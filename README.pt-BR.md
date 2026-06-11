@@ -100,6 +100,25 @@ Reinicie o Codex após clonar.
 
 ## Uso
 
+### Escolha correta de entrada
+
+Para qualquer demanda de coding (criar, editar, deletar, mover ou formatar
+arquivos), use sempre o comando/skill direto:
+
+```bash
+/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend "implemente os componentes solicitados"
+```
+
+Não use `antigravity-agent` para coding. Esse agente é read-only e existe apenas
+para análise, planejamento, auditoria e impacto de refactor. Isso evita criar uma
+camada Claude intermediária que consome tokens Claude e pode escrever arquivos por
+Bash em vez de delegar o trabalho ao AGY.
+
+Em monorepos, um padrão recomendado é deixar o Claude Code responsável pelo
+back-end, containers e validação, enquanto todo o front-end vai para o AGY via
+`/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend`. Veja o
+caso UC13 em [`CASOS_USO.md`](CASOS_USO.md).
+
 ```bash
 # Tarefa agêntica — padrão, cria e edita arquivos no workspace
 /cc-antigravity-plugin:antigravity "Refatore o módulo auth para async/await e atualize todos os callers"
@@ -132,10 +151,10 @@ Reinicie o Codex após clonar.
 /cc-antigravity-plugin:antigravity --generate-image --files "brand/style.json" --output-dir ./assets "logotipo seguindo o guia de identidade visual"
 ```
 
-No Codex, use o agente via:
+No Codex, use o skill:
 
 ```text
-@antigravity-agent <tarefa>
+$antigravity-integration <tarefa>
 ```
 
 ## Opções
@@ -146,7 +165,7 @@ No Codex, use o agente via:
 | `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por vírgula |
 | `--add-dir <path>` | Adiciona diretório ao workspace nativo do AGY via `--add-dir`; repetível |
 | `--model <name>` | Modelo a usar; escrito em `settings.json` antes do spawn e restaurado após. Ver tabela abaixo. |
-| `--parallel` | Permite que o AGY divida a tarefa entre múltiplos subagentes Gemini nativos (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). O próprio AGY decide quantos. Requer TTY ou injeção de prompt. |
+| `--parallel` | Permite que o AGY divida a tarefa entre múltiplos subagentes Gemini nativos (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). O próprio AGY decide quantos. Funciona no modo headless padrão. |
 | `--subagent-model <name>` | Modelo que os subagentes spawnados devem usar (transmitido via prompt — o AGY não tem flag de CLI por subagente). Ativa `--parallel` automaticamente. Padrão: o modelo da sessão principal. |
 | `--read-only` | Desativa `--dangerously-skip-permissions` e o auto-add do cwd. Use para análise pura sem modificar arquivos. |
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
@@ -236,13 +255,13 @@ npm test
 ```
 
 ```
-ℹ pass 94
+ℹ pass 102
 ℹ fail 0
 ```
 
 Cobertura: parse de argumentos · coleta de contexto · geração de prompt · bloco de paralelismo (`--parallel` / `--subagent-model`) · spawn via ConPTY · heartbeat de timeout · detecção de encoding · seleção de modelo · exit codes.
 
-Para exemplos práticos de uso em cenários reais, consulte [`CASOS_USO.md`](CASOS_USO.md) — 11 casos de uso cobrindo análise de arquitetura, refatoração multi-arquivo, geração de documentação e decomposição de tarefas paralelas.
+Para exemplos práticos de uso em cenários reais, consulte [`CASOS_USO.md`](CASOS_USO.md) — 13 casos de uso cobrindo análise de arquitetura, refatoração multi-arquivo, geração de documentação, decomposição de tarefas paralelas, geração de imagens e delegação em monorepo.
 
 ## Desenvolvimento
 

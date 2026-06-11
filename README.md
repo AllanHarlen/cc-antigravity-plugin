@@ -100,24 +100,24 @@ Restart Codex after cloning.
 
 ## Usage
 
-### Escolha correta de entrada
+### Correct Entry Point
 
-Para qualquer demanda de coding (criar, editar, deletar, mover ou formatar
-arquivos), use sempre o comando/skill direto:
+For any coding request (creating, editing, deleting, moving, or formatting
+files), always use the direct command/skill path:
 
 ```bash
-/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend "implemente os componentes solicitados"
+/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend "implement the requested components"
 ```
 
-Não use `antigravity-agent` para coding. Esse agente é read-only e existe apenas
-para análise, planejamento, auditoria e impacto de refactor. Isso evita criar uma
-camada Claude intermediária que consome tokens Claude e pode escrever arquivos por
-Bash em vez de delegar o trabalho ao AGY.
+Do not use `antigravity-agent` for coding. That agent is read-only and exists
+only for analysis, planning, audits, and refactor-impact work. This avoids
+creating an intermediate Claude subagent layer that spends Claude tokens and may
+write files through Bash instead of delegating the work to AGY.
 
-Em monorepos, um padrão recomendado é deixar o Claude Code responsável pelo
-back-end, containers e validação, enquanto todo o front-end vai para o AGY via
-`/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend`. Veja o
-caso UC13 em [`CASOS_USO.md`](CASOS_USO.md).
+In monorepos, the recommended pattern is to keep Claude Code responsible for the
+back-end, containers, and validation, while all front-end work goes to AGY via
+`/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend`. See UC13 in
+[`CASOS_USO.md`](CASOS_USO.md).
 
 ```bash
 # Agentic task — default, creates and edits files in workspace
@@ -151,17 +151,10 @@ caso UC13 em [`CASOS_USO.md`](CASOS_USO.md).
 /cc-antigravity-plugin:antigravity --generate-image --files "brand/style.json" --output-dir ./assets "logo following the visual identity guide"
 ```
 
-<<<<<<< HEAD
-No Codex, use o skill via:
+In Codex, use the skill:
 
 ```text
-$antigravity-integration <tarefa>
-=======
-In Codex, use the agent via:
-
-```text
-@antigravity-agent <task>
->>>>>>> 872b7e6aa1daf3d933d0af62c140ae8516fc7f8d
+$antigravity-integration <task>
 ```
 
 ## Options
@@ -172,7 +165,7 @@ In Codex, use the agent via:
 | `--files <glob,...>` | Inject files matching comma-separated globs |
 | `--add-dir <path>` | Add directory to AGY's native workspace via `--add-dir`; repeatable |
 | `--model <name>` | Model to use; written to `settings.json` before spawn and restored after. See table below. |
-| `--parallel` | Allow AGY to split the task among multiple native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). AGY decides how many. Requires TTY or prompt injection. |
+| `--parallel` | Allow AGY to split the task among multiple native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). AGY decides how many. Works in default headless mode. |
 | `--subagent-model <name>` | Model for spawned subagents (passed via prompt — AGY has no per-subagent CLI flag). Enables `--parallel` automatically. Default: model of main session. |
 | `--read-only` | Disables `--dangerously-skip-permissions` and auto-add of cwd. Use for pure analysis without modifying files. |
 | `--continue`, `-c` | Resume the most recent AGY conversation |
@@ -262,13 +255,13 @@ npm test
 ```
 
 ```
-ℹ pass 94
+ℹ pass 102
 ℹ fail 0
 ```
 
 Coverage: argument parsing · context collection · prompt generation · parallelism block (`--parallel` / `--subagent-model`) · ConPTY spawn · timeout heartbeat · encoding detection · model selection · exit codes.
 
-For practical usage examples in real scenarios, see [`CASOS_USO.md`](CASOS_USO.md) — 11 use cases covering architecture analysis, multi-file refactoring, documentation generation, and parallel task decomposition.
+For practical usage examples in real scenarios, see [`CASOS_USO.md`](CASOS_USO.md) — 13 use cases covering architecture analysis, multi-file refactoring, documentation generation, parallel task decomposition, image generation, and monorepo delegation.
 
 ## Development
 
