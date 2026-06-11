@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.6.5",
+    "version": "3.7.0",
     "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Coding uses the command/skill path; the bundled antigravity-agent is read-only analysis only.",
     "author": {
         "name": "Allan Harlen",

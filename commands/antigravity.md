@@ -52,6 +52,55 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 - The current working directory is added to AGY's workspace via `--add-dir <cwd>`
 - Timeout: 10 minutes (override with `--timeout`)
 
+## Natural Language → Flags Contract
+
+This command is the bridge between the user's natural-language request and AGY's
+headless execution. Before invoking the bridge, translate the request into explicit
+flags. The goal is that the session runs exactly as the prompt asked — the requested
+model, in the right mode.
+
+### Model selection
+
+When the user names a model in prose, map it to a canonical `--model` value. The bridge
+also normalizes loose names defensively, but pass the canonical id whenever you can.
+
+| User says (natural language) | Pass | Resolves to |
+|------------------------------|------|-------------|
+| "use gemini 3.1 pro", "with Pro" | `--model gemini-3.1-pro-high` | Gemini 3.1 Pro (High) |
+| "gemini 3.1 pro low", "cheap pro" | `--model gemini-3.1-pro-low` | Gemini 3.1 Pro (Low) |
+| "gemini flash", "fast", "flash" | `--model gemini-3.5-flash-medium` | Gemini 3.5 Flash (Medium) |
+| "claude opus", "opus" | `--model claude-4.6-opus-thinking` | Claude 4.6 Opus (Thinking) |
+| "claude sonnet", "sonnet" | `--model claude-4.6-sonnet-thinking` | Claude 4.6 Sonnet (Thinking) |
+| "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
+| "pick the model for me" | `--model auto` | Flash tier chosen by context size |
+| (no model mentioned) | omit `--model` | User default → `gemini-3.5-flash-medium` |
+
+The bridge writes the resolved model to AGY's `settings.json` before spawning and
+restores it afterwards. If a model name is not recognized, the bridge warns on stderr
+and passes it through unchanged.
+
+### Mode selection (agentic vs read-only)
+
+The default mode is **agentic** (`--dangerously-skip-permissions` + workspace auto-add).
+Choose the mode from the verb in the request:
+
+| Intent in the request | Mode |
+|-----------------------|------|
+| develop, create, build, write, implement, refactor, fix, edit, generate, format | Agentic (default — do **not** pass `--read-only`) |
+| explain, analyze, review, audit, map, understand, trace, plan (no file writes) | `--read-only` |
+
+### Worked example
+
+Request: *"use o gemini 3.1 pro e desenvolva um front-end"*
+
+- Model: "gemini 3.1 pro" → `--model gemini-3.1-pro-high`
+- Verb: "desenvolva" (develop) → agentic (default mode, no `--read-only`)
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --model gemini-3.1-pro-high -- "desenvolva um front-end <detalhes do escopo>"
+```
+
 ## Execution Instructions
 
 Parse arguments into bridge flags, then execute through the shared bridge:

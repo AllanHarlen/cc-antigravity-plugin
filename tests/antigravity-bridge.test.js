@@ -12,11 +12,13 @@ import {
   checkAgyConnectivity,
   classifyAgyOutput,
   collectContextFiles,
+  isKnownModel,
   parseCliArgs,
   patchAgySettings,
   resolveAgyExe,
   resolveAgySettingsPath,
   resolveAutoModel,
+  resolveModelAlias,
   spawnViaConPty,
   stripAnsi,
   EXIT_QUOTA_EXAUSTED,
@@ -688,9 +690,65 @@ test("agyModelLabel maps known bridge identifiers to AGY display labels", () => 
   assert.equal(agyModelLabel("gemini-3.1-pro-high"),     "Gemini 3.1 Pro (High)");
 });
 
+test("agyModelLabel maps Claude and GPT-OSS identifiers to AGY display labels", () => {
+  assert.equal(agyModelLabel("claude-4.6-sonnet-thinking"), "Claude 4.6 Sonnet (Thinking)");
+  assert.equal(agyModelLabel("claude-4.6-opus-thinking"),   "Claude 4.6 Opus (Thinking)");
+  assert.equal(agyModelLabel("gpt-oss-120b-medium"),        "GPT-OSS 120B (Medium)");
+});
+
 test("agyModelLabel passes through unknown identifiers unchanged", () => {
-  assert.equal(agyModelLabel("claude-4.6-sonnet-thinking"), "claude-4.6-sonnet-thinking");
-  assert.equal(agyModelLabel("some-future-model"),          "some-future-model");
+  assert.equal(agyModelLabel("some-future-model"), "some-future-model");
+});
+
+// ─── resolveModelAlias / isKnownModel ─────────────────────────────────────────
+
+test("resolveModelAlias passes canonical identifiers through unchanged", () => {
+  for (const id of [
+    "gemini-3.5-flash-low",
+    "gemini-3.5-flash-medium",
+    "gemini-3.5-flash-high",
+    "gemini-3.1-pro-low",
+    "gemini-3.1-pro-high",
+    "claude-4.6-sonnet-thinking",
+    "claude-4.6-opus-thinking",
+    "gpt-oss-120b-medium",
+    "nano-banana",
+    "auto",
+  ]) {
+    assert.equal(resolveModelAlias(id), id);
+  }
+});
+
+test("resolveModelAlias normalizes natural-language model names", () => {
+  assert.equal(resolveModelAlias("gemini 3.1 pro"), "gemini-3.1-pro-high");
+  assert.equal(resolveModelAlias("Gemini 3.1 Pro (Low)"), "gemini-3.1-pro-low");
+  assert.equal(resolveModelAlias("gemini 3.5 flash"), "gemini-3.5-flash-medium");
+  assert.equal(resolveModelAlias("flash"), "gemini-3.5-flash-medium");
+  assert.equal(resolveModelAlias("claude opus"), "claude-4.6-opus-thinking");
+  assert.equal(resolveModelAlias("opus"), "claude-4.6-opus-thinking");
+  assert.equal(resolveModelAlias("claude sonnet"), "claude-4.6-sonnet-thinking");
+  assert.equal(resolveModelAlias("sonnet"), "claude-4.6-sonnet-thinking");
+  assert.equal(resolveModelAlias("gpt oss"), "gpt-oss-120b-medium");
+  assert.equal(resolveModelAlias("nano banana"), "nano-banana");
+});
+
+test("resolveModelAlias normalizes underscores and mixed separators", () => {
+  assert.equal(resolveModelAlias("gemini_3.1_pro_high"), "gemini-3.1-pro-high");
+  assert.equal(resolveModelAlias("  Claude   Opus  "), "claude-4.6-opus-thinking");
+});
+
+test("resolveModelAlias returns unknown names unchanged", () => {
+  assert.equal(resolveModelAlias("totally-made-up"), "totally-made-up");
+  assert.equal(resolveModelAlias(""), "");
+  assert.equal(resolveModelAlias(undefined), undefined);
+});
+
+test("isKnownModel recognizes canonical identifiers and auto, rejects others", () => {
+  assert.equal(isKnownModel("gemini-3.1-pro-high"), true);
+  assert.equal(isKnownModel("claude-4.6-opus-thinking"), true);
+  assert.equal(isKnownModel("auto"), true);
+  assert.equal(isKnownModel("gemini 3.1 pro"), false);
+  assert.equal(isKnownModel("made-up"), false);
 });
 
 // ─── resolveAgySettingsPath ───────────────────────────────────────────────────

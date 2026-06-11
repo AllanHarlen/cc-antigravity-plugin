@@ -120,6 +120,9 @@ Options:
                                         claude-4.6-sonnet-thinking, claude-4.6-opus-thinking,
                                         gpt-oss-120b-medium, nano-banana (image generation),
                                         auto (selects flash tier by context size)
+                             Natural-language aliases are also accepted and normalized, e.g.
+                             "gemini 3.1 pro" -> gemini-3.1-pro-high, "claude opus" -> claude-4.6-opus-thinking,
+                             "flash" -> gemini-3.5-flash-medium, "sonnet" -> claude-4.6-sonnet-thinking.
   --generate-imagem          Generate an image from the task description using AGY's Nano Banana model.
                              Defaults --model to nano-banana. Compatible with --model to override.
   --parallel                 Allow AGY to fan the task out across multiple native Gemini subagents
@@ -864,13 +867,79 @@ export function resolveAutoModel(context) {
 // Maps bridge model identifiers to AGY settings.json display labels (confirmed from AGY transcripts).
 // AGY reads the "model" field in settings.json as a human-readable label, not an API identifier.
 const AGY_MODEL_LABELS = {
-  "gemini-3.5-flash-low":    "Gemini 3.5 Flash (Low)",
-  "gemini-3.5-flash-medium": "Gemini 3.5 Flash (Medium)",
-  "gemini-3.5-flash-high":   "Gemini 3.5 Flash (High)",
-  "gemini-3.1-pro-low":      "Gemini 3.1 Pro (Low)",
-  "gemini-3.1-pro-high":     "Gemini 3.1 Pro (High)",
-  "nano-banana":             "Nano Banana",
+  "gemini-3.5-flash-low":      "Gemini 3.5 Flash (Low)",
+  "gemini-3.5-flash-medium":   "Gemini 3.5 Flash (Medium)",
+  "gemini-3.5-flash-high":     "Gemini 3.5 Flash (High)",
+  "gemini-3.1-pro-low":        "Gemini 3.1 Pro (Low)",
+  "gemini-3.1-pro-high":       "Gemini 3.1 Pro (High)",
+  "claude-4.6-sonnet-thinking":"Claude 4.6 Sonnet (Thinking)",
+  "claude-4.6-opus-thinking":  "Claude 4.6 Opus (Thinking)",
+  "gpt-oss-120b-medium":       "GPT-OSS 120B (Medium)",
+  "nano-banana":               "Nano Banana",
 };
+
+// The full set of canonical model identifiers the bridge understands. `auto` is a
+// virtual identifier resolved at runtime from context size (see resolveAutoModel).
+export const CANONICAL_MODELS = new Set([...Object.keys(AGY_MODEL_LABELS), "auto"]);
+
+// Natural-language → canonical identifier map. Claude (the orchestrator) is expected to
+// translate user prose into a canonical --model value, but users and other callers often
+// pass loose names ("gemini 3.1 pro", "claude opus", "flash"). This map normalizes those
+// so the contract still applies the model the prompt actually asked for, instead of
+// silently falling back to the default. Bare family names default to the most capable tier.
+const MODEL_ALIASES = {
+  // Gemini Flash family
+  "flash":                  "gemini-3.5-flash-medium",
+  "gemini-flash":           "gemini-3.5-flash-medium",
+  "gemini-3.5-flash":       "gemini-3.5-flash-medium",
+  // Gemini Pro family
+  "pro":                    "gemini-3.1-pro-high",
+  "gemini-pro":             "gemini-3.1-pro-high",
+  "gemini-3.1-pro":         "gemini-3.1-pro-high",
+  // Claude family
+  "claude":                 "claude-4.6-opus-thinking",
+  "claude-opus":            "claude-4.6-opus-thinking",
+  "opus":                   "claude-4.6-opus-thinking",
+  "claude-4.6-opus":        "claude-4.6-opus-thinking",
+  "claude-sonnet":          "claude-4.6-sonnet-thinking",
+  "sonnet":                 "claude-4.6-sonnet-thinking",
+  "claude-4.6-sonnet":      "claude-4.6-sonnet-thinking",
+  // GPT-OSS family
+  "gpt":                    "gpt-oss-120b-medium",
+  "gpt-oss":                "gpt-oss-120b-medium",
+  "gpt-oss-120b":           "gpt-oss-120b-medium",
+  // Image generation
+  "nano":                   "nano-banana",
+  "banana":                 "nano-banana",
+};
+
+// Lowercases and collapses whitespace, underscores, parentheses, and repeated dashes so
+// that "Gemini 3.1 Pro (High)", "gemini_3.1_pro_high", and "gemini-3.1-pro-high" all
+// normalize to the same canonical token.
+function normalizeModelToken(raw) {
+  return String(raw)
+    .toLowerCase()
+    .replace(/[()]/g, " ")
+    .replace(/[\s_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+// Resolves a possibly natural-language model name to a canonical bridge identifier.
+// Returns the canonical id when recognized; otherwise returns the input unchanged so the
+// caller can decide whether to warn. Canonical ids and AGY display labels pass through.
+export function resolveModelAlias(raw) {
+  if (!raw) return raw;
+  const norm = normalizeModelToken(raw);
+  if (CANONICAL_MODELS.has(norm)) return norm;
+  if (MODEL_ALIASES[norm]) return MODEL_ALIASES[norm];
+  return raw;
+}
+
+// True when a resolved model is one the bridge can map to an AGY display label.
+export function isKnownModel(model) {
+  return CANONICAL_MODELS.has(model);
+}
 
 // Converts a bridge model identifier to the display label AGY stores in settings.json.
 // Unknown models are passed through as-is (AGY falls back to its default).
@@ -1108,7 +1177,20 @@ export async function main(argv = process.argv.slice(2), {
     }
 
     const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
-    let model = parsed.model ?? (parsed.generateImagem ? "nano-banana" : defaultModel);
+    // Normalize natural-language / loose model names ("gemini 3.1 pro", "claude opus")
+    // to canonical identifiers so the requested model is actually applied via settings.json.
+    const requestedModel = parsed.model ? resolveModelAlias(parsed.model) : undefined;
+    if (parsed.model && requestedModel !== parsed.model) {
+      logEvent("bridge.model.alias", { requested: parsed.model, resolved: requestedModel });
+    }
+    if (requestedModel && requestedModel !== "auto" && !isKnownModel(requestedModel)) {
+      _stderr.write(
+        `Warning: unrecognized model "${parsed.model}". Passing it through to AGY unchanged; ` +
+          "if AGY does not recognize the label it will fall back to its default model.\n",
+      );
+      logEvent("bridge.model.unknown", { requested: parsed.model, resolved: requestedModel });
+    }
+    let model = requestedModel ?? (parsed.generateImagem ? "nano-banana" : defaultModel);
     const modelSource = parsed.model ? "flag" : (parsed.generateImagem ? "generate-imagem-default" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"));
 
     // In agentic mode, automatically add cwd to the AGY workspace when the caller
@@ -1145,7 +1227,7 @@ export async function main(argv = process.argv.slice(2), {
           task: parsed.task,
           context,
           parallel: parsed.parallel,
-          subagentModel: parsed.subagentModel,
+          subagentModel: parsed.subagentModel ? resolveModelAlias(parsed.subagentModel) : undefined,
         });
 
     // Windows CreateProcess limit: ~32,767 chars total. Real prompts (with quotes,
@@ -1169,7 +1251,7 @@ export async function main(argv = process.argv.slice(2), {
         task: parsed.task,
         context: fallbackContext,
         parallel: parsed.parallel,
-        subagentModel: parsed.subagentModel,
+        subagentModel: parsed.subagentModel ? resolveModelAlias(parsed.subagentModel) : undefined,
       });
     }
 

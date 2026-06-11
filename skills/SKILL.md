@@ -30,6 +30,41 @@ native tools to complete the task without requiring permission confirmations.
 
 Pass `--read-only` to disable this for tasks that must not modify files.
 
+## Natural Language → Flags Contract
+
+Translate the user's prose into explicit flags before invoking the bridge so the session
+runs exactly as requested. The bridge normalizes loose model names defensively, but pass
+the canonical id whenever you can.
+
+### Model selection
+
+| User says (natural language) | Pass | Resolves to |
+|------------------------------|------|-------------|
+| "use gemini 3.1 pro", "with Pro" | `--model gemini-3.1-pro-high` | Gemini 3.1 Pro (High) |
+| "gemini 3.1 pro low" | `--model gemini-3.1-pro-low` | Gemini 3.1 Pro (Low) |
+| "gemini flash", "fast", "flash" | `--model gemini-3.5-flash-medium` | Gemini 3.5 Flash (Medium) |
+| "claude opus", "opus" | `--model claude-4.6-opus-thinking` | Claude 4.6 Opus (Thinking) |
+| "claude sonnet", "sonnet" | `--model claude-4.6-sonnet-thinking` | Claude 4.6 Sonnet (Thinking) |
+| "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
+| "pick the model for me" | `--model auto` | Flash tier chosen by context size |
+| (no model mentioned) | omit `--model` | User default → `gemini-3.5-flash-medium` |
+
+### Mode selection
+
+Default is **agentic**. Choose from the verb in the request:
+
+- develop / create / build / refactor / fix / implement / generate → agentic (default)
+- explain / analyze / review / audit / map / plan (no writes) → `--read-only`
+
+### Worked example
+
+*"use o gemini 3.1 pro e desenvolva um front-end"* → model `gemini-3.1-pro-high`, agentic mode:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
+  --model gemini-3.1-pro-high -- "desenvolva um front-end <escopo>"
+```
+
 ## Host Entry Points
 
 ### Claude Code
