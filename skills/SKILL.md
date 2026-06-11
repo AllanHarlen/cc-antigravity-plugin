@@ -1,7 +1,7 @@
 ---
 name: antigravity-integration
 description: Use Antigravity CLI (AGY) as an agentic coding assistant for tasks that require creating, editing, or searching files across the codebase — or for large-context analysis that benefits from synthesizing many files in one pass.
-allowed-tools: Bash, Glob, Read
+allowed-tools: Bash(node *antigravity-bridge.js*), Glob, Read
 ---
 
 # Antigravity CLI Integration
@@ -34,14 +34,16 @@ Pass `--read-only` to disable this for tasks that must not modify files.
 
 ### Claude Code
 
+For coding tasks, use the command/skill directly. Do not spawn
+`antigravity-agent` for work that creates, edits, deletes, moves, or formats
+files; that agent is read-only analysis only.
+
 ```bash
 /cc-antigravity-plugin:antigravity <task>
 /cc-antigravity-plugin:antigravity --dirs src,docs <task>
 /cc-antigravity-plugin:antigravity --files "schemas/**/*.json" <task>
 /cc-antigravity-plugin:antigravity --read-only --dirs src <task>
 ```
-
-Claude can also spawn `antigravity-agent` when the task benefits from AGY.
 
 ### Codex
 

@@ -1,6 +1,6 @@
 ---
-description: Invoke the Antigravity (AGY) bridge as an agentic coding assistant — creates, edits, and searches files autonomously using AGY's native tools
-allowed-tools: Bash, Glob, Read
+description: Invoke the Antigravity (AGY) bridge directly as the canonical agentic coding path; creates, edits, and searches files using AGY's native tools
+allowed-tools: Bash(node *antigravity-bridge.js*), Glob, Read
 argument-hint: "[--model name] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
@@ -9,6 +9,10 @@ argument-hint: "[--model name] [--generate-image] [--parallel] [--subagent-model
 Runs an Antigravity CLI (AGY) agentic session to complete coding tasks. AGY receives
 the task and uses its native tools (`write_to_file`, `replace_file_content`,
 `grep_search`, `run_command`, etc.) to complete the work autonomously.
+
+Use this command directly for any task that creates, edits, deletes, moves, or
+formats files. Do not route coding work through `antigravity-agent`; that agent is
+read-only and exists only for analysis/planning.
 
 By default, the bridge runs with `--dangerously-skip-permissions` and adds the current
 working directory to the AGY workspace. Pass `--read-only` for analysis-only tasks.

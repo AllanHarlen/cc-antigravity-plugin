@@ -217,6 +217,66 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 
 ---
 
+## UC13 — MonoRepo com Claude no back-end e AGY no front-end
+
+Delegar uma fatia inteira de front-end para o AGY enquanto o Claude Code fica
+responsável pelo back-end, containers e validação geral.
+
+**Prompt de orquestração recomendado para o Claude Code:**
+
+```text
+MonoRepo:
+front-end: React + TypeScript + AntD
+back-end: .NET 9 + PostgreSQL + Docker + Docker Compose
+
+Forma de execução:
+- Claude Code atua como desenvolvedor específico do back-end.
+- Todas as tasks de front-end devem ser terceirizadas para o slash command direto:
+  /cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend "<task>"
+- Nunca usar Agent(subagent_type="cc-antigravity-plugin:antigravity-agent") para coding.
+- O antigravity-agent é permitido apenas para análise read-only.
+- Claude Code deve garantir que os containers subam em ambiente de desenvolvimento
+  para iniciar os testes.
+```
+
+**Delegação front-end correta:**
+
+```bash
+/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend \
+  "Implemente o front-end React + TypeScript + AntD para uma oficina mecânica.
+  Crie um nome coeso para a oficina. Inclua tela inicial com apresentação, área
+  sobre, carrossel de serviços, menu superior com Home, Sobre, Contato e botão
+  para área privada. Na área privada, implemente menu lateral com Dashboard,
+  Serviços (CRUD completo) e Ordem de Serviço (CRUD completo). Use estrutura de
+  arquivos consistente, componentes reutilizáveis e reporte os arquivos alterados."
+```
+
+**Geração de imagens correta:**
+
+Use chamadas dedicadas com `--generate-imagem` para criar os assets antes ou
+durante a implementação do front-end. Prefira nomes coesos no prompt e um
+diretório explícito de saída.
+
+```bash
+/cc-antigravity-plugin:antigravity --generate-imagem --output-dir ./frontend/src/assets \
+  "Crie hero-oficina-mecanica.png: imagem hero moderna para oficina mecânica chamada Oficina Atlas, com mecânicos trabalhando, ambiente limpo e confiável."
+```
+
+```bash
+/cc-antigravity-plugin:antigravity --generate-imagem --output-dir ./frontend/src/assets \
+  "Crie servicos-oficina-carousel.png: imagem coesa para carrossel de serviços automotivos, incluindo revisão, alinhamento, freios e diagnóstico eletrônico."
+```
+
+**Por que este padrão importa:**
+
+- O slash command chama diretamente o bridge, que chama o AGY CLI.
+- `--parallel` permite fan-out em subagentes Gemini nativos para telas/CRUDs independentes.
+- `--add-dir ./frontend` dá ao AGY acesso nativo ao workspace do front-end.
+- Evitar `antigravity-agent` impede que um subagente Claude escreva arquivos por Bash e consuma tokens Claude desnecessariamente.
+- Claude Code continua livre para cuidar do back-end, Docker, Docker Compose, migrations e testes de integração.
+
+---
+
 ## Resultados de testes em runtime
 
 | Caso | Funcionalidade validada | Status | Observação |

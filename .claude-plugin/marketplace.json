@@ -1,6 +1,6 @@
 {
     "name": "cc-antigravity-plugin",
-    "description": "Agentic coding assistant powered by Antigravity CLI (AGY) — creates, edits, and searches files autonomously. Includes model forwarding via settings.json, QUOTA_EXAUSTED signaling, and structured exit codes.",
+    "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Coding uses the command/skill path; the bundled antigravity-agent is read-only analysis only.",
     "owner": {
         "name": "Allan Harlen",
         "email": "allanharlen@gmail.com"
@@ -9,8 +9,8 @@
         {
             "name": "cc-antigravity-plugin",
             "displayName": "Antigravity Agentic Coder",
-            "description": "Invoke Antigravity CLI (AGY) as an agentic coding assistant — creates, edits, searches, and runs commands autonomously. QUOTA_EXAUSTED signaling and structured exit codes for workflow orchestration.",
-            "version": "3.6.3",
+            "description": "Invoke Antigravity CLI (AGY) through the direct bridge for coding. The antigravity-agent entry point is read-only analysis only.",
+            "version": "3.6.5",
             "author": {
                 "name": "Allan Harlen",
                 "email": "allanharlen@gmail.com"

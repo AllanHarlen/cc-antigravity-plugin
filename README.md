@@ -97,6 +97,25 @@ Reinicie o Codex após clonar.
 
 ## Uso
 
+### Escolha correta de entrada
+
+Para qualquer demanda de coding (criar, editar, deletar, mover ou formatar
+arquivos), use sempre o comando/skill direto:
+
+```bash
+/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend "implemente os componentes solicitados"
+```
+
+Não use `antigravity-agent` para coding. Esse agente é read-only e existe apenas
+para análise, planejamento, auditoria e impacto de refactor. Isso evita criar uma
+camada Claude intermediária que consome tokens Claude e pode escrever arquivos por
+Bash em vez de delegar o trabalho ao AGY.
+
+Em monorepos, um padrão recomendado é deixar o Claude Code responsável pelo
+back-end, containers e validação, enquanto todo o front-end vai para o AGY via
+`/cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend`. Veja o
+caso UC13 em [`CASOS_USO.md`](CASOS_USO.md).
+
 ```bash
 # Tarefa agêntica — padrão, cria e edita arquivos no workspace
 /cc-antigravity-plugin:antigravity "Refatore o módulo auth para async/await e atualize todos os callers"
@@ -129,10 +148,10 @@ Reinicie o Codex após clonar.
 /cc-antigravity-plugin:antigravity --generate-imagem --files "brand/style.json" --output-dir ./assets "logotipo seguindo o guia de identidade visual"
 ```
 
-No Codex, use o agente via:
+No Codex, use o skill via:
 
 ```text
-@antigravity-agent <tarefa>
+$antigravity-integration <tarefa>
 ```
 
 ## Opções
