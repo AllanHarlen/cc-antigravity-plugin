@@ -79,7 +79,7 @@ Usar Pro para tarefas que exigem mais raciocínio (design de schema, algoritmos,
 
 **Modelos disponíveis para raciocínio:** `gemini-3.1-pro-low`, `gemini-3.1-pro-high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`
 
-**Modelo para geração de imagem:** `nano-banana` (via `--generate-imagem`)
+**Modelo para geração de imagem:** `nano-banana` (via `--generate-image`)
 
 ---
 
@@ -177,12 +177,12 @@ Quando o AGY atinge o limite de cota, o bridge emite um sinal estruturado e indi
 
 ---
 
-## UC12 — Geração de imagem com Nano Banana (`--generate-imagem`)
+## UC12 — Geração de imagem com Nano Banana (`--generate-image`)
 
 Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana do AGY.
 
 ```
-/cc-antigravity-plugin:antigravity --generate-imagem \
+/cc-antigravity-plugin:antigravity --generate-image \
   "um skyline futurista ao pôr do sol, estilo cyberpunk, tons de roxo e laranja"
 ```
 
@@ -195,19 +195,19 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 
 **Com contexto de estilo (arquivos de referência):**
 ```
-/cc-antigravity-plugin:antigravity --generate-imagem --files "brand/style.json" \
+/cc-antigravity-plugin:antigravity --generate-image --files "brand/style.json" \
   "logotipo para o produto seguindo o guia de identidade visual"
 ```
 
 **Com diretório de destino específico:**
 ```
-/cc-antigravity-plugin:antigravity --generate-imagem --output-dir ./assets \
+/cc-antigravity-plugin:antigravity --generate-image --output-dir ./assets \
   "banner para a página inicial, estilo minimalista"
 ```
 
 **Sobrescrever o modelo:**
 ```
-/cc-antigravity-plugin:antigravity --generate-imagem --model gemini-3.1-pro-high \
+/cc-antigravity-plugin:antigravity --generate-image --model gemini-3.1-pro-high \
   "uma ilustração técnica detalhada de uma arquitetura de microserviços"
 ```
 
@@ -235,6 +235,10 @@ Forma de execução:
   /cc-antigravity-plugin:antigravity --parallel --add-dir ./frontend "<task>"
 - Nunca usar Agent(subagent_type="cc-antigravity-plugin:antigravity-agent") para coding.
 - O antigravity-agent é permitido apenas para análise read-only.
+- Se quiser que o coding rode como subagente monitorado pelo harness, use
+  Agent(subagent_type="cc-antigravity-plugin:antigravity-coder"): ele só atua via
+  bridge (sem Write/Edit/Bash amplo), então o AGY/Gemini faz os arquivos sem
+  gastar tokens Claude com geração de conteúdo.
 - Claude Code deve garantir que os containers subam em ambiente de desenvolvimento
   para iniciar os testes.
 ```
@@ -253,17 +257,26 @@ Forma de execução:
 
 **Geração de imagens correta:**
 
-Use chamadas dedicadas com `--generate-imagem` para criar os assets antes ou
+Use chamadas dedicadas com `--generate-image` para criar os assets antes ou
 durante a implementação do front-end. Prefira nomes coesos no prompt e um
 diretório explícito de saída.
 
+Quando o front-end roda pelo subagente `antigravity-coder`, ele identifica
+proativamente superfícies que ganham com imagem (home/hero, login, rodapé, áreas
+"sobre", estados vazios) e devolve um bloco `IMAGE_SUGGESTIONS` com nome de arquivo,
+diretório e prompt de cada candidata. O coder **não** pergunta ao usuário (é
+subagente e não tem `AskUserQuestion`): o **harness do Claude Code** apresenta as
+candidatas via `AskUserQuestion` (multiSelect, uma opção por imagem) e gera só as
+aprovadas — uma imagem por chamada (não combina `--generate-image` com `--parallel`)
+— conectando os arquivos aos componentes.
+
 ```bash
-/cc-antigravity-plugin:antigravity --generate-imagem --output-dir ./frontend/src/assets \
+/cc-antigravity-plugin:antigravity --generate-image --output-dir ./frontend/src/assets \
   "Crie hero-oficina-mecanica.png: imagem hero moderna para oficina mecânica chamada Oficina Atlas, com mecânicos trabalhando, ambiente limpo e confiável."
 ```
 
 ```bash
-/cc-antigravity-plugin:antigravity --generate-imagem --output-dir ./frontend/src/assets \
+/cc-antigravity-plugin:antigravity --generate-image --output-dir ./frontend/src/assets \
   "Crie servicos-oficina-carousel.png: imagem coesa para carrossel de serviços automotivos, incluindo revisão, alinhamento, freios e diagnóstico eletrônico."
 ```
 
@@ -272,7 +285,7 @@ diretório explícito de saída.
 - O slash command chama diretamente o bridge, que chama o AGY CLI.
 - `--parallel` permite fan-out em subagentes Gemini nativos para telas/CRUDs independentes.
 - `--add-dir ./frontend` dá ao AGY acesso nativo ao workspace do front-end.
-- Evitar `antigravity-agent` impede que um subagente Claude escreva arquivos por Bash e consuma tokens Claude desnecessariamente.
+- Evitar `antigravity-agent` para coding impede que um subagente Claude escreva arquivos por Bash e consuma tokens Claude desnecessariamente; quando um subagente é desejável, o `antigravity-coder` resolve isso na raiz, pois não tem ferramentas para escrever arquivos a não ser o próprio bridge.
 - Claude Code continua livre para cuidar do back-end, Docker, Docker Compose, migrations e testes de integração.
 
 ---
@@ -286,7 +299,7 @@ diretório explícito de saída.
 | UC06 `gemini-3.1-pro-low` | Model forwarding via settings.json | ✅ | AGY reportou `Gemini 3.1 Pro` |
 | UC06 `gemini-3.5-flash-high` | Identifier `gemini-3.5-flash-high` | ✅ | AGY reportou `Gemini 3.5 Flash` |
 | UC07 | `--model auto` contexto vazio | ✅ | `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` |
-| UC12 | `--generate-imagem` flag + nano-banana + `copyGeneratedImages` | ✅ | Implementado e documentado |
+| UC12 | `--generate-image` flag + nano-banana + `copyGeneratedImages` | ✅ | Implementado e documentado |
 | UC04/UC03 | Modo agêntico (criar/editar arquivos) | ⬜ | Pendente |
 | UC09 | `--continue` retomar sessão | ⬜ | Pendente |
 | UC08 | Heartbeat tarefa longa | ⬜ | Pendente |

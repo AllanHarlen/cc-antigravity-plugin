@@ -1,8 +1,8 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.7.0",
-    "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Coding uses the command/skill path; the bundled antigravity-agent is read-only analysis only.",
+    "version": "3.8.0",
+    "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Use the command/skill path or the antigravity-coder subagent for implementation; the bundled antigravity-agent is read-only analysis only.",
     "author": {
         "name": "Allan Harlen",
         "email": "allanharlen@gmail.com"
@@ -28,6 +28,7 @@
         "./commands/antigravity.md"
     ],
     "agents": [
+        "./agents/antigravity-coder.md",
         "./agents/antigravity-agent.md"
     ],
     "requiresExternalTool": {
@@ -39,7 +40,7 @@
         "default_model": {
             "type": "string",
             "title": "Default AGY Model",
-            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium, nano-banana (image generation via --generate-imagem), auto.",
+            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium, nano-banana (image generation via --generate-image), auto.",
             "default": "gemini-3.5-flash-medium"
         },
         "timeout": {
@@ -47,6 +48,12 @@
             "title": "Default Timeout",
             "description": "Default timeout for AGY print mode, for example 3m, 300s, or 5m0s.",
             "default": "5m0s"
+        },
+        "coding_policy": {
+            "type": "string",
+            "title": "Coding-Delegation Policy",
+            "description": "When on, a SessionStart hook injects the plugin's coding-delegation policy as session context (delegate file work to AGY via the skill/command or antigravity-coder, --parallel for big front-end, model guidance, and the AskUserQuestion image flow). Set to off/false/0/no to suppress injection.",
+            "default": "on"
         }
     }
 }

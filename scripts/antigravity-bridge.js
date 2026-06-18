@@ -123,8 +123,9 @@ Options:
                              Natural-language aliases are also accepted and normalized, e.g.
                              "gemini 3.1 pro" -> gemini-3.1-pro-high, "claude opus" -> claude-4.6-opus-thinking,
                              "flash" -> gemini-3.5-flash-medium, "sonnet" -> claude-4.6-sonnet-thinking.
-  --generate-imagem          Generate an image from the task description using AGY's Nano Banana model.
+  --generate-image           Generate an image from the task description using AGY's Nano Banana model.
                              Defaults --model to nano-banana. Compatible with --model to override.
+                             Alias: --generate-imagem.
   --parallel                 Allow AGY to fan the task out across multiple native Gemini subagents
                              (DefineSubagent / invoke_subagent / ManageSubagents). AGY decides how
                              many subagents to spawn based on the task's independent subparts.

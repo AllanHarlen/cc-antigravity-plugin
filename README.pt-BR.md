@@ -110,9 +110,21 @@ arquivos), use sempre o comando/skill direto:
 ```
 
 Não use `antigravity-agent` para coding. Esse agente é read-only e existe apenas
-para análise, planejamento, auditoria e impacto de refactor. Isso evita criar uma
-camada Claude intermediária que consome tokens Claude e pode escrever arquivos por
-Bash em vez de delegar o trabalho ao AGY.
+para análise, planejamento, auditoria e impacto de refactor.
+
+Se você quer especificamente que a execução de coding seja monitorada pelo
+harness como um subagente, use o agente **`antigravity-coder`** em vez do
+read-only. Ele é o caminho de subagente sancionado para implementação: não tem
+`Write`/`Edit` nem `Bash` amplo — sua única ferramenta que atua em arquivos é o
+bridge, então o AGY/Gemini faz a geração dos arquivos e ele não consome tokens
+Claude escrevendo conteúdo. O caminho direto via comando/skill continua sendo a
+opção mais simples quando você não precisa de uma camada de subagente separada.
+
+**Essa política vem com o plugin — não precisa de arquivo de rules pessoal.** Um
+hook `SessionStart` injeta automaticamente a política de delegação (delegar coding
+ao AGY, `--parallel` em front-end grande, recomendação de modelo e o fluxo de
+imagem via `AskUserQuestion`) como contexto da sessão. Desligue com a opção
+`coding_policy` do plugin (defina como `off`).
 
 Em monorepos, um padrão recomendado é deixar o Claude Code responsável pelo
 back-end, containers e validação, enquanto todo o front-end vai para o AGY via
@@ -171,6 +183,7 @@ $antigravity-integration <tarefa>
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
 | `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
 | `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
+| `--output-file <path>` | Grava a saída completa do AGY em arquivo em vez de transmitir ao stdout, e lê de volta. Auto-ativado para `--parallel` em contexto sem TTY. |
 | `--interactive`, `--agent` | Usa `--prompt-interactive` para sessão interativa (requer TTY) |
 | `--sandbox` | Ativa o modo sandbox do AGY |
 | `--max-files <n>` | Número máximo de arquivos injetados no contexto inline. Padrão: `40` |

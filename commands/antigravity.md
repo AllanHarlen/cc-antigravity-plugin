@@ -42,6 +42,8 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 | `--continue`, `-c` | Continue the most recent AGY conversation | `--continue` |
 | `--conversation <id>` | Resume a specific AGY conversation | `--conversation abc123` |
 | `--timeout <duration>` | Forward `--print-timeout` to AGY | `--timeout 10m` |
+| `--output-file <path>` | Write the full AGY output to a file instead of streaming to stdout, then read it back. Auto-enabled for `--parallel` in non-TTY contexts | `--output-file out.txt` |
+| `--output-dir <path>` | Destination directory for generated images (used with `--generate-image`) | `--output-dir ./assets` |
 | `--interactive` | Use AGY `--prompt-interactive` for a human-at-terminal session | `--interactive` |
 | `--sandbox` | Enable AGY sandbox mode | `--sandbox` |
 | `<task>` | Coding task or question | required |

@@ -110,6 +110,8 @@ file ingestion, prompt assembly, QUOTA_EXAUSTED detection, and AGY invocation.
 | `--continue`, `-c` | Continue the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation |
 | `--timeout <duration>` | Forward `--print-timeout` to AGY (default: 10m) |
+| `--output-file <path>` | Write full AGY output to a file instead of streaming to stdout; read it back afterwards. Auto-enabled for `--parallel` in non-TTY contexts |
+| `--output-dir <path>` | Destination directory for generated images (with `--generate-image`) |
 | `--interactive` | Use AGY `--prompt-interactive` for human-at-terminal sessions |
 | `--sandbox` | Enable AGY sandbox mode |
 | `--print-command` | Inspect the resolved AGY command without running it |

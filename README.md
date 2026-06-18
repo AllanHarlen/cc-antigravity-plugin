@@ -110,9 +110,21 @@ files), always use the direct command/skill path:
 ```
 
 Do not use `antigravity-agent` for coding. That agent is read-only and exists
-only for analysis, planning, audits, and refactor-impact work. This avoids
-creating an intermediate Claude subagent layer that spends Claude tokens and may
-write files through Bash instead of delegating the work to AGY.
+only for analysis, planning, audits, and refactor-impact work.
+
+If you specifically want the coding run tracked by the harness as a subagent,
+use the **`antigravity-coder`** agent instead of the read-only one. It is the
+sanctioned subagent path for implementation: it has no `Write`/`Edit` and no
+broad `Bash` — its only file-acting tool is the bridge, so AGY/Gemini performs
+the file generation and it does not spend Claude tokens writing file contents.
+The plain command/skill path remains the simplest option when you do not need a
+separate subagent layer.
+
+**This policy ships with the plugin — no personal rules file needed.** A
+`SessionStart` hook injects the coding-delegation policy (delegate file work to AGY,
+`--parallel` for large front-end, model guidance, and the front-end image
+`AskUserQuestion` flow) as session context automatically. Turn it off with the
+`coding_policy` plugin option (set it to `off`).
 
 In monorepos, the recommended pattern is to keep Claude Code responsible for the
 back-end, containers, and validation, while all front-end work goes to AGY via
@@ -171,6 +183,7 @@ $antigravity-integration <task>
 | `--continue`, `-c` | Resume the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation by ID |
 | `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |
+| `--output-file <path>` | Write full AGY output to a file instead of streaming to stdout, then read it back. Auto-enabled for `--parallel` in non-TTY contexts. |
 | `--interactive`, `--agent` | Use `--prompt-interactive` for interactive session (requires TTY) |
 | `--sandbox` | Enable AGY sandbox mode |
 | `--max-files <n>` | Maximum files injected as inline context. Default: `40` |
