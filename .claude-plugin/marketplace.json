@@ -10,7 +10,7 @@
             "name": "cc-antigravity-plugin",
             "displayName": "Antigravity Agentic Coder",
             "description": "Invoke Antigravity CLI (AGY) through the direct bridge for coding. The antigravity-agent entry point is read-only analysis only.",
-            "version": "3.6.5",
+            "version": "4.0.0",
             "author": {
                 "name": "Allan Harlen",
                 "email": "allanharlen@gmail.com"

@@ -66,7 +66,8 @@ file creation/editing pattern.
 
 ## What the Bridge Owns
 
-- argument parsing and read-only defaults
+- argument parsing and native read-only enforcement (`--mode plan`, without skip-permissions)
+- dynamic model discovery and JSON/NDJSON parsing
 - file and directory ingestion (inline context)
 - structured prompt assembly
 - QUOTA_EXAUSTED / AUTH_REQUIRED / TIMEOUT detection and structured signaling
@@ -99,15 +100,15 @@ Do not use this agent for:
    - `--files` for precise globs or mixed data sources
    - `--add-dir` only when AGY should inspect additional directories through its workspace
 4. Always pass `--read-only`.
-5. Always pass `--output-file <tmp-path>` and use the `Read` tool to retrieve the output.
+5. Use `--output-file <tmp-path>` and `Read` only when the response may be too large for stdout.
 6. If exit code is `10` (QUOTA_EXAUSTED), report the structured signal and suggest retry.
 7. If exit code is `11` (AUTH_REQUIRED), tell the user to run `agy` interactively.
 
-## Output Retrieval (required)
+## Output Retrieval (optional for large responses)
 
-The Bash tool captures stdout via a sandbox pipe that cannot handle AGY's async
-ConPTY output. Always use `--output-file` so the bridge writes the full output
-to a file, then retrieve it with the `Read` tool.
+Headless AGY now runs through a normal async child process and emits parsed JSON responses
+reliably on stdout. Use `--output-file` when the response is expected to be long, then
+retrieve it with `Read`. PTY/ConPTY is reserved for explicit `--interactive` sessions.
 
 Pattern:
 
@@ -153,7 +154,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
 
 ## Failure Handling
 
-- Exit `10` (QUOTA_EXAUSTED): report the JSON signal, suggest `--continue` to retry later.
+- Exit `10` (QUOTA_EXAUSTED): report the JSON signal and prefer its exact `--conversation <id>` retry; use `--continue` only when no ID is available.
 - Exit `11` (AUTH_REQUIRED): tell the user to run `agy` once interactively.
 - Exit `12` (TIMEOUT): suggest `--timeout 15m` or narrowing the task scope.
 - Exit `13` (AGY_MISSING): report the install instructions from the bridge output.

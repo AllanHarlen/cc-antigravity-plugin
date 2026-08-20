@@ -60,7 +60,7 @@ Criar um novo arquivo a partir de dados ou especificação existente no projeto.
 Entender o que vai quebrar antes de fazer uma alteração crítica.
 
 ```
-/cc-antigravity-plugin:antigravity --read-only --model gemini-3.1-pro-low \
+/cc-antigravity-plugin:antigravity --read-only --model gemini-3.7-flash-high \
   "Se eu remover a função `getUserById` de src/services/user.js, quais arquivos seriam afetados? Liste com o motivo de cada um."
 ```
 
@@ -70,16 +70,16 @@ Entender o que vai quebrar antes de fazer uma alteração crítica.
 
 ## UC06 — Modelo específico para raciocínio profundo
 
-Usar Pro para tarefas que exigem mais raciocínio (design de schema, algoritmos, análise de segurança).
+Fixar um modelo e effort para tarefas que exigem mais raciocínio (design de schema, algoritmos, análise de segurança).
 
 ```
-/cc-antigravity-plugin:antigravity --model gemini-3.1-pro-low \
+/cc-antigravity-plugin:antigravity --model gemini-3.7-flash-high --effort high \
   "Projete o schema do banco de dados para um sistema de e-commerce com produtos, pedidos, usuários e pagamentos. Inclua índices e justifique as decisões."
 ```
 
-**Modelos disponíveis para raciocínio:** `gemini-3.1-pro-low`, `gemini-3.1-pro-high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`
+**Catálogo:** o bridge consulta `agy models` e mantém cache por 24 horas. Famílias atuais incluem `gemini-3.7-flash-*`, `gemini-3.6-flash-*`, `claude-sonnet-4-6` e `claude-opus-4-6-thinking`.
 
-**Modelo para geração de imagem:** `nano-banana` (via `--generate-image`)
+**Geração de imagem:** `--generate-image` usa a tool `generate_imagem`; não existe modelo `nano-banana`.
 
 ---
 
@@ -96,11 +96,11 @@ Deixar o bridge escolher o modelo baseado no tamanho do contexto inline.
 
 | Contexto inline total | Modelo selecionado |
 |---|---|
-| < 32 KB | `gemini-3.5-flash-low` |
-| 32 KB – 256 KB | `gemini-3.5-flash-medium` |
-| ≥ 256 KB | `gemini-3.5-flash-high` |
+| < 32 KB | tier low da família Flash mais nova |
+| 32 KB – 256 KB | tier medium da família Flash mais nova |
+| ≥ 256 KB | tier high da família Flash mais nova |
 
-**Verificado em runtime:** `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` ✅
+**Contrato testado:** com o fallback atual e contexto vazio, resolve para `gemini-3.7-flash-low`; novos catálogos avançam automaticamente a família.
 
 ---
 
@@ -142,15 +142,15 @@ Retomar o contexto de uma conversa anterior para tarefas em múltiplos passos.
 Ver o comando `agy` que seria executado, sem gastar cota.
 
 ```
-/cc-antigravity-plugin:antigravity --print-command --model gemini-3.1-pro-low \
+/cc-antigravity-plugin:antigravity --print-command --model gemini-3.7-flash-high \
   --dirs scripts --timeout 5m "analisar auth"
 ```
 
 **Útil para:** depuração, verificar quais arquivos serão injetados no contexto, confirmar flags antes de uma tarefa longa.
 
-**O que aparece no output:** `--add-dir <cwd>`, `--dangerously-skip-permissions`, `--print`, `--print-timeout 5m` e o prompt completo com os arquivos de `scripts/` inline.
+**O que aparece no output:** `--model gemini-3.7-flash-high`, `--output-format json`, `--disable-slash-commands`, `--add-dir <cwd>`, `--dangerously-skip-permissions`, `--print`, `--print-timeout 5m` e o prompt completo.
 
-> `--model` não aparece nos args do `agy` — é aplicado via `settings.json` antes do spawn.
+> O bridge usa as flags nativas da CLI e nunca toca no `settings.json` global do usuário.
 
 ---
 
@@ -162,9 +162,11 @@ Quando o AGY atinge o limite de cota, o bridge emite um sinal estruturado e indi
 ```json
 {
   "status": "QUOTA_EXAUSTED",
-  "reason": "quota or rate limit reached",
-  "model": "gemini-3.5-flash-medium",
-  "retry": "--continue"
+  "reason": "Individual quota reached...",
+  "model": "gemini-3.7-flash-high",
+  "conversation_id": "6d4c3cf0-...",
+  "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+  "retry": "--conversation 6d4c3cf0-..."
 }
 ```
 
@@ -172,14 +174,14 @@ Quando o AGY atinge o limite de cota, o bridge emite um sinal estruturado e indi
 
 **Para retomar após reset de cota:**
 ```
-/cc-antigravity-plugin:antigravity --continue "Continue a partir de onde parou."
+/cc-antigravity-plugin:antigravity --conversation 6d4c3cf0-... "Continue a partir de onde parou."
 ```
 
 ---
 
-## UC12 — Geração de imagem com Nano Banana (`--generate-image`)
+## UC12 — Geração de imagem com `generate_imagem` (`--generate-image`)
 
-Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana do AGY.
+Gerar uma imagem a partir de uma descrição textual usando a tool nativa `generate_imagem` do AGY.
 
 ```
 /cc-antigravity-plugin:antigravity --generate-image \
@@ -187,7 +189,7 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 ```
 
 **O que acontece internamente:**
-1. O bridge define `--model nano-banana` automaticamente (sem precisar passar `--model`)
+1. O bridge preserva o modelo padrão do usuário (ou o `--model` solicitado)
 2. O prompt enviado ao AGY inclui a constraint `generate_imagem` em vez das constraints de edição de código
 3. AGY usa a tool `generate_imagem` com a descrição e salva o arquivo em `~/.gemini/antigravity-cli/brain/`
 4. O bridge varre esse diretório por arquivos de imagem criados após o início da sessão e os copia para o diretório de destino
@@ -207,7 +209,7 @@ Gerar uma imagem a partir de uma descrição textual usando o modelo Nano Banana
 
 **Sobrescrever o modelo:**
 ```
-/cc-antigravity-plugin:antigravity --generate-image --model gemini-3.1-pro-high \
+/cc-antigravity-plugin:antigravity --generate-image --model gemini-3.7-flash-high \
   "uma ilustração técnica detalhada de uma arquitetura de microserviços"
 ```
 
@@ -290,16 +292,18 @@ aprovadas — uma imagem por chamada (não combina `--generate-image` com `--par
 
 ---
 
-## Resultados de testes em runtime
+## Matriz de verificação
 
 | Caso | Funcionalidade validada | Status | Observação |
 |---|---|---|---|
 | UC01 | Conectividade / smoke test | ✅ | `plugin-ok` retornado |
 | UC02 | Análise read-only | ✅ | Sem modificações no workspace |
-| UC06 `gemini-3.1-pro-low` | Model forwarding via settings.json | ✅ | AGY reportou `Gemini 3.1 Pro` |
-| UC06 `gemini-3.5-flash-high` | Identifier `gemini-3.5-flash-high` | ✅ | AGY reportou `Gemini 3.5 Flash` |
-| UC07 | `--model auto` contexto vazio | ✅ | `source:"auto"`, `model:"gemini-3.5-flash-low"`, `contextBytes:0` |
-| UC12 | `--generate-image` flag + nano-banana + `copyGeneratedImages` | ✅ | Implementado e documentado |
+| UC06 | `--model`/`--effort` nativos | ✅ | Coberto por `--print-command` e testes unitários |
+| UC07 | `--model auto` com catálogo dinâmico | ✅ | Seleciona o tier da família Flash mais nova |
+| UC11 | Envelope JSON real de quota | ✅ | Exit 10 inclui `conversation_id`, `usage` e retry exato |
+| UC12 | `--generate-image` sem slug sintético | ✅ | Tool `generate_imagem` + `copyGeneratedImages` |
+| UC02 | `--read-only` → `--mode plan` | ✅ | Sem skip-permissions e sem `--disable-slash-commands`, pois AGY 1.1.16 ignora plan quando ambos são combinados |
+| Fan-out | `--format stream-json --parallel` | ✅ | Parser NDJSON incremental cobre tools/subagentes/result |
 | UC04/UC03 | Modo agêntico (criar/editar arquivos) | ⬜ | Pendente |
 | UC09 | `--continue` retomar sessão | ⬜ | Pendente |
 | UC08 | Heartbeat tarefa longa | ⬜ | Pendente |

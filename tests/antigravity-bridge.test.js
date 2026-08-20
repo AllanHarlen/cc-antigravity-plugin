@@ -3,21 +3,24 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 import {
-  agyModelLabel,
   buildAntigravityArgs,
   buildAntigravityPrompt,
   buildImagePrompt,
   checkAgyConnectivity,
   classifyAgyOutput,
   collectContextFiles,
+  createAgyStreamParser,
+  FALLBACK_MODEL_CATALOG,
   isKnownModel,
+  parseAgyJsonResult,
+  parseAgyModelsOutput,
   parseCliArgs,
-  patchAgySettings,
   resolveAgyExe,
-  resolveAgySettingsPath,
   resolveAutoModel,
+  resolveModelCatalog,
   resolveModelAlias,
   spawnViaConPty,
   stripAnsi,
@@ -44,6 +47,11 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     files: ["**/*.json", "docs/**/*.md"],
     format: "text",
     model: undefined,
+    effort: undefined,
+    mode: undefined,
+    agent: undefined,
+    jsonSchema: undefined,
+    disableSlashCommands: true,
     timeout: undefined,
     interactive: false,
     readOnly: false,
@@ -174,7 +182,7 @@ test("buildAntigravityPrompt uses MUST when subagent-model is specified", () => 
   assert.match(prompt, /You MUST decompose/);
   assert.doesNotMatch(prompt, /You MAY decompose/);
   assert.match(prompt, /Each independent part of the task MUST be handled by a dedicated subagent/);
-  assert.match(prompt, /Configure each subagent to use the model "Gemini 3\.5 Flash \(Medium\)"/);
+  assert.match(prompt, /Configure each subagent to use the model "gemini-3\.5-flash-medium"/);
 });
 
 test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {
@@ -198,6 +206,9 @@ test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {
     "docs",
     "--sandbox",
     "--dangerously-skip-permissions",
+    "--output-format",
+    "json",
+    "--disable-slash-commands",
     "--print",
     "<task>Analyze</task>",
     "--print-timeout",
@@ -205,10 +216,37 @@ test("buildAntigravityArgs maps bridge options to AGY CLI flags", () => {
   ]);
 });
 
-test("buildAntigravityArgs does not include model or format in CLI args (model is applied via settings.json)", () => {
-  const args = buildAntigravityArgs({ prompt: "x", model: "gemini-3.1-pro-low", format: "json" });
-  assert.equal(args.length, 2);
-  assert.ok(!args.some((a) => a.startsWith("--model") || a.startsWith("--format")));
+test("buildAntigravityArgs forwards model, format, effort, mode, agent, and schema", () => {
+  const args = buildAntigravityArgs({
+    prompt: "x",
+    model: "gemini-3.7-flash-high",
+    format: "json",
+    effort: "high",
+    mode: "plan",
+    agent: "code-reviewer",
+    jsonSchema: "schema.json",
+  });
+  assert.deepEqual(args, [
+    "--model", "gemini-3.7-flash-high",
+    "--effort", "high",
+    "--mode", "plan",
+    "--agent", "code-reviewer",
+    "--output-format", "json",
+    "--json-schema", "schema.json",
+    "--disable-slash-commands",
+    "--print", "x",
+  ]);
+});
+
+test("buildAntigravityPrompt uses non-mutating constraints in read-only mode", () => {
+  const prompt = buildAntigravityPrompt({
+    task: "Analyze",
+    context: { included: [], skipped: [] },
+    readOnly: true,
+  });
+  assert.match(prompt, /read-only analysis assistant/);
+  assert.match(prompt, /Do not call write_to_file/);
+  assert.doesNotMatch(prompt, /create and edit files/);
 });
 
 test("buildAntigravityArgs supports interactive agent mode", () => {
@@ -313,6 +351,7 @@ test("parseCliArgs parses AGY passthrough and conversation flags", () => {
     "--sandbox",
     "--skip-permissions",
     "--agent",
+    "code-reviewer",
     "task",
   ]);
 
@@ -322,7 +361,8 @@ test("parseCliArgs parses AGY passthrough and conversation flags", () => {
   assert.equal(parsed.conversationId, "conv-1");
   assert.equal(parsed.sandbox, true);
   assert.equal(parsed.skipPermissions, true);
-  assert.equal(parsed.interactive, true);
+  assert.equal(parsed.agent, "code-reviewer");
+  assert.equal(parsed.interactive, false);
 });
 
 test("parseCliArgs --model sets model and does not contaminate task", () => {
@@ -352,7 +392,29 @@ test("parseCliArgs throws when no task and no --help", () => {
 });
 
 test("parseCliArgs throws on unsupported --format value", () => {
-  assert.throws(() => parseCliArgs(["--format", "json", "task"]), /unsupported/i);
+  assert.throws(() => parseCliArgs(["--format", "yaml", "task"]), /unsupported/i);
+});
+
+test("parseCliArgs supports modern headless flags and read-only enforces plan mode", () => {
+  const parsed = parseCliArgs([
+    "--format", "stream-json",
+    "--effort", "medium",
+    "--mode", "accept-edits",
+    "--json-schema", "schema.json",
+    "--allow-slash-commands",
+    "--read-only",
+    "task",
+  ]);
+  assert.equal(parsed.format, "json", "json-schema must force JSON output");
+  assert.equal(parsed.effort, "medium");
+  assert.equal(parsed.mode, "plan", "read-only must override accept-edits regardless of flag order");
+  assert.equal(parsed.jsonSchema, "schema.json");
+  assert.equal(parsed.disableSlashCommands, false);
+  assert.equal(parsed.skipPermissions, false);
+});
+
+test("parseCliArgs --agent requires a name and points interactive users to --interactive", () => {
+  assert.throws(() => parseCliArgs(["--agent"]), /Use --interactive/);
 });
 
 test("parseCliArgs throws on --max-files 0", () => {
@@ -525,27 +587,27 @@ test("resolveAgyExe returns the first discovered agy executable", () => {
 
 test("resolveAutoModel returns flash-low for small context", () => {
   const ctx = { included: [{ bytes: 10_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-low");
+  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-low");
 });
 
 test("resolveAutoModel returns flash-medium for typical context", () => {
   const ctx = { included: [{ bytes: 100_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-medium");
+  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-medium");
 });
 
 test("resolveAutoModel returns flash-high for large context", () => {
   const ctx = { included: [{ bytes: 300_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-high");
+  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-high");
 });
 
 test("resolveAutoModel sums bytes across multiple included files", () => {
   const ctx = { included: [{ bytes: 100_000 }, { bytes: 200_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-high");
+  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-high");
 });
 
 test("resolveAutoModel returns flash-low for empty context", () => {
   const ctx = { included: [], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.5-flash-low");
+  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-low");
 });
 
 test("spawnViaConPty streams chunks incrementally", async () => {
@@ -616,6 +678,8 @@ test("parseCliArgs --read-only sets readOnly and disables skipPermissions", () =
   const parsed = parseCliArgs(["--read-only", "analyze this"]);
   assert.equal(parsed.readOnly, true);
   assert.equal(parsed.skipPermissions, false);
+  assert.equal(parsed.mode, "plan");
+  assert.equal(parsed.disableSlashCommands, false);
 });
 
 test("parseCliArgs --skip-permissions is a no-op when already true by default", () => {
@@ -680,61 +744,27 @@ test("collectContextFiles skips file with invalid UTF-8 encoding", async () => {
   assert.equal(context.skipped[0].reason, "encoding-error");
 });
 
-// ─── agyModelLabel ────────────────────────────────────────────────────────────
+// ─── dynamic model catalog ────────────────────────────────────────────────────
 
-test("agyModelLabel maps known bridge identifiers to AGY display labels", () => {
-  assert.equal(agyModelLabel("gemini-3.5-flash-low"),    "Gemini 3.5 Flash (Low)");
-  assert.equal(agyModelLabel("gemini-3.5-flash-medium"), "Gemini 3.5 Flash (Medium)");
-  assert.equal(agyModelLabel("gemini-3.5-flash-high"),   "Gemini 3.5 Flash (High)");
-  assert.equal(agyModelLabel("gemini-3.1-pro-low"),      "Gemini 3.1 Pro (Low)");
-  assert.equal(agyModelLabel("gemini-3.1-pro-high"),     "Gemini 3.1 Pro (High)");
+test("parseAgyModelsOutput parses slug and display label columns", () => {
+  assert.deepEqual(
+    parseAgyModelsOutput(
+      "gemini-3.7-flash-high\tGemini 3.7 Flash (High)\nclaude-opus-4-6-thinking   Claude Opus 4.6 (Thinking)\n",
+    ),
+    [
+      { slug: "gemini-3.7-flash-high", label: "Gemini 3.7 Flash (High)" },
+      { slug: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 (Thinking)" },
+    ],
+  );
 });
 
-test("agyModelLabel maps Claude and GPT-OSS identifiers to AGY display labels", () => {
-  assert.equal(agyModelLabel("claude-4.6-sonnet-thinking"), "Claude 4.6 Sonnet (Thinking)");
-  assert.equal(agyModelLabel("claude-4.6-opus-thinking"),   "Claude 4.6 Opus (Thinking)");
-  assert.equal(agyModelLabel("gpt-oss-120b-medium"),        "GPT-OSS 120B (Medium)");
-});
-
-test("agyModelLabel passes through unknown identifiers unchanged", () => {
-  assert.equal(agyModelLabel("some-future-model"), "some-future-model");
-});
-
-// ─── resolveModelAlias / isKnownModel ─────────────────────────────────────────
-
-test("resolveModelAlias passes canonical identifiers through unchanged", () => {
-  for (const id of [
-    "gemini-3.5-flash-low",
-    "gemini-3.5-flash-medium",
-    "gemini-3.5-flash-high",
-    "gemini-3.1-pro-low",
-    "gemini-3.1-pro-high",
-    "claude-4.6-sonnet-thinking",
-    "claude-4.6-opus-thinking",
-    "gpt-oss-120b-medium",
-    "nano-banana",
-    "auto",
-  ]) {
-    assert.equal(resolveModelAlias(id), id);
-  }
-});
-
-test("resolveModelAlias normalizes natural-language model names", () => {
-  assert.equal(resolveModelAlias("gemini 3.1 pro"), "gemini-3.1-pro-high");
-  assert.equal(resolveModelAlias("Gemini 3.1 Pro (Low)"), "gemini-3.1-pro-low");
-  assert.equal(resolveModelAlias("gemini 3.5 flash"), "gemini-3.5-flash-medium");
-  assert.equal(resolveModelAlias("flash"), "gemini-3.5-flash-medium");
-  assert.equal(resolveModelAlias("claude opus"), "claude-4.6-opus-thinking");
-  assert.equal(resolveModelAlias("opus"), "claude-4.6-opus-thinking");
-  assert.equal(resolveModelAlias("claude sonnet"), "claude-4.6-sonnet-thinking");
-  assert.equal(resolveModelAlias("sonnet"), "claude-4.6-sonnet-thinking");
+test("resolveModelAlias resolves labels and families against the newest runtime catalog member", () => {
+  assert.equal(resolveModelAlias("Gemini 3.7 Flash (Medium)"), "gemini-3.7-flash-medium");
+  assert.equal(resolveModelAlias("gemini 3.7 flash"), "gemini-3.7-flash-high");
+  assert.equal(resolveModelAlias("flash"), "gemini-3.7-flash-high");
+  assert.equal(resolveModelAlias("opus"), "claude-opus-4-6-thinking");
+  assert.equal(resolveModelAlias("sonnet"), "claude-sonnet-4-6");
   assert.equal(resolveModelAlias("gpt oss"), "gpt-oss-120b-medium");
-  assert.equal(resolveModelAlias("nano banana"), "nano-banana");
-});
-
-test("resolveModelAlias normalizes underscores and mixed separators", () => {
-  assert.equal(resolveModelAlias("gemini_3.1_pro_high"), "gemini-3.1-pro-high");
-  assert.equal(resolveModelAlias("  Claude   Opus  "), "claude-4.6-opus-thinking");
 });
 
 test("resolveModelAlias returns unknown names unchanged", () => {
@@ -743,50 +773,91 @@ test("resolveModelAlias returns unknown names unchanged", () => {
   assert.equal(resolveModelAlias(undefined), undefined);
 });
 
-test("isKnownModel recognizes canonical identifiers and auto, rejects others", () => {
-  assert.equal(isKnownModel("gemini-3.1-pro-high"), true);
-  assert.equal(isKnownModel("claude-4.6-opus-thinking"), true);
+test("isKnownModel recognizes runtime slugs and auto, rejects obsolete and unknown slugs", () => {
+  assert.equal(isKnownModel("gemini-3.7-flash-high"), true);
+  assert.equal(isKnownModel("claude-opus-4-6-thinking"), true);
   assert.equal(isKnownModel("auto"), true);
-  assert.equal(isKnownModel("gemini 3.1 pro"), false);
+  assert.equal(isKnownModel("claude-4.6-opus-thinking"), false);
   assert.equal(isKnownModel("made-up"), false);
 });
 
-// ─── resolveAgySettingsPath ───────────────────────────────────────────────────
-
-test("resolveAgySettingsPath returns ~/.gemini/antigravity-cli/settings.json", () => {
-  const p = resolveAgySettingsPath();
-  assert.ok(typeof p === "string" && p.endsWith("settings.json"), `unexpected path: ${p}`);
-  assert.ok(p.includes(path.join(".gemini", "antigravity-cli")), `expected .gemini/antigravity-cli in path: ${p}`);
+test("resolveModelCatalog queries agy models, writes cache, then serves a fresh cache", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-model-cache-"));
+  const cachePath = path.join(tempDir, "models.json");
+  let calls = 0;
+  const first = await resolveModelCatalog({
+    agyExe: "agy",
+    cachePath,
+    now: 1_000,
+    _spawnSync: () => {
+      calls += 1;
+      return { status: 0, stdout: "future-model-1 Future Model 1\n" };
+    },
+  });
+  const second = await resolveModelCatalog({
+    agyExe: "agy",
+    cachePath,
+    now: 2_000,
+    _spawnSync: () => { throw new Error("cache should avoid CLI call"); },
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(first, [{ slug: "future-model-1", label: "Future Model 1" }]);
+  assert.deepEqual(second, first);
 });
 
-// ─── patchAgySettings ────────────────────────────────────────────────────────
-
-test("patchAgySettings writes display label and restores original content", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-patch-"));
-  const settingsPath = path.join(tempDir, "settings.json");
-
-  await fs.writeFile(settingsPath, JSON.stringify({ other: true }), "utf8");
-  const restore = await patchAgySettings(settingsPath, "gemini-3.1-pro-low");
-  const patched = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-  assert.equal(patched.model, agyModelLabel("gemini-3.1-pro-low"), "must write display label, not bridge identifier");
-  assert.equal(patched.other, true, "existing fields must be preserved");
-
-  await restore();
-  const restored = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-  assert.equal(restored.model, undefined, "model field must be removed on restore");
-  assert.equal(restored.other, true);
+test("resolveModelCatalog falls back when agy models is unavailable", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-model-fallback-"));
+  const models = await resolveModelCatalog({
+    agyExe: "agy",
+    cachePath: path.join(tempDir, "missing.json"),
+    _spawnSync: () => ({ status: 1, stdout: "", stderr: "not authenticated" }),
+  });
+  assert.deepEqual(models, FALLBACK_MODEL_CATALOG);
 });
 
-test("patchAgySettings creates settings.json when absent and removes it on restore", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-patch-new-"));
-  const settingsPath = path.join(tempDir, "settings.json");
+test("installed agy model catalog is covered by the emergency fallback", (t) => {
+  const result = spawnSync("agy", ["models"], { encoding: "utf8", shell: false, timeout: 30_000 });
+  const installed = result.status === 0 ? parseAgyModelsOutput(result.stdout) : [];
+  if (installed.length === 0) {
+    t.skip("agy is absent, unauthenticated, or did not return a model catalog");
+    return;
+  }
+  const fallbackSlugs = new Set(FALLBACK_MODEL_CATALOG.map(({ slug }) => slug));
+  assert.deepEqual(
+    installed.filter(({ slug }) => !fallbackSlugs.has(slug)),
+    [],
+    "add every installed AGY model to FALLBACK_MODEL_CATALOG",
+  );
+});
 
-  const restore = await patchAgySettings(settingsPath, "gemini-3.5-flash-high");
-  const created = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-  assert.equal(created.model, agyModelLabel("gemini-3.5-flash-high"));
+test("parseAgyJsonResult normalizes the real JSON envelope and quota classification", () => {
+  const result = parseAgyJsonResult(JSON.stringify({
+    conversation_id: "6d4c3cf0-test",
+    status: "ERROR",
+    response: "",
+    error: "Individual quota reached. Please upgrade your subscription to increase your limits.",
+    duration_seconds: 0,
+    num_turns: 1,
+    usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+  }));
+  assert.equal(result.conversationId, "6d4c3cf0-test");
+  assert.equal(result.numTurns, 1);
+  assert.equal(classifyAgyOutput(result, { format: "json" })?.type, "QUOTA_EXAUSTED");
+});
 
-  await restore();
-  await assert.rejects(() => fs.readFile(settingsPath, "utf8"), "settings.json should be deleted on restore");
+test("createAgyStreamParser handles chunked NDJSON, progress, tools, subagents, and result", () => {
+  const progress = [];
+  const parser = createAgyStreamParser({ onProgress: (line) => progress.push(line) });
+  parser.push('{"event":"init","conversation_id":"conv-1","init":{}}\n');
+  parser.push('{"event":"step_update","step_update":{"tool_info":{"name":"run_command","parameters":{"CommandLine":"echo ok"}}}}\n');
+  parser.push('{"event":"step_update","step_update":{"subagent_info":{"conversation_id":"sub-1","log_uri":"file:///log"}}}\n');
+  parser.push('{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"O');
+  parser.push('K","duration_seconds":1,"num_turns":1}}\n');
+  const result = parser.end();
+  assert.equal(result.response, "OK");
+  assert.match(progress.join("\n"), /conversation conv-1/);
+  assert.match(progress.join("\n"), /tool run_command/);
+  assert.match(progress.join("\n"), /subagent sub-1/);
 });
 
 test("spawnViaConPty heartbeat: timeout resets on each output chunk", async () => {
@@ -867,8 +938,8 @@ test("parseCliArgs --generate-imagem does not contaminate model", () => {
   assert.equal(parsed.model, undefined);
 });
 
-test("agyModelLabel maps nano-banana to Nano Banana", () => {
-  assert.equal(agyModelLabel("nano-banana"), "Nano Banana");
+test("fallback catalog treats image generation as a tool rather than a nano-banana model", () => {
+  assert.equal(FALLBACK_MODEL_CATALOG.some(({ slug }) => slug === "nano-banana"), false);
 });
 
 test("buildImagePrompt contains generate_imagem constraint", () => {

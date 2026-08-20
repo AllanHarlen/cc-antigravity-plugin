@@ -19,8 +19,8 @@ description: |
 
   <example>
   Context: User asks for a specific model to do the implementation
-  user: "Use gemini 3.1 pro and build the backend endpoints"
-  assistant: "I will use antigravity-coder with --model gemini-3.1-pro-high in agentic mode."
+  user: "Use gemini 3.7 flash and build the backend endpoints"
+  assistant: "I will use antigravity-coder with --model gemini-3.7-flash-high in agentic mode."
   </example>
 
 tools: ["Bash(node *antigravity-bridge.js*)", "Glob", "Read"]
@@ -54,14 +54,13 @@ normalizes loose names defensively, but pass the canonical id whenever you can.
 
 | User says (natural language) | Pass | Resolves to |
 |------------------------------|------|-------------|
-| "use gemini 3.1 pro", "with Pro" | `--model gemini-3.1-pro-high` | Gemini 3.1 Pro (High) |
-| "gemini 3.1 pro low", "cheap pro" | `--model gemini-3.1-pro-low` | Gemini 3.1 Pro (Low) |
-| "gemini flash", "fast", "flash" | `--model gemini-3.5-flash-medium` | Gemini 3.5 Flash (Medium) |
-| "claude opus", "opus" | `--model claude-4.6-opus-thinking` | Claude 4.6 Opus (Thinking) |
-| "claude sonnet", "sonnet" | `--model claude-4.6-sonnet-thinking` | Claude 4.6 Sonnet (Thinking) |
+| "gemini 3.7 flash", "flash" | `--model gemini-3.7-flash-high` | Newest matching Flash member from `agy models` |
+| "gemini 3.7 flash medium" | `--model gemini-3.7-flash-medium` | Gemini 3.7 Flash (Medium), when available |
+| "claude opus", "opus" | `--model claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) |
+| "claude sonnet", "sonnet" | `--model claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) |
 | "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
 | "pick the model for me" | `--model auto` | Flash tier chosen by context size |
-| (no model mentioned) | omit `--model` | User default → `gemini-3.5-flash-medium` |
+| (no model mentioned) | omit `--model` | Preserve the user's current AGY `/model` |
 
 ## Intent to Mode Conversion
 
@@ -76,10 +75,13 @@ work:
   task out across native Gemini subagents and chooses the count).
 - "no diretório X" / "from ./Y" / monorepo slice → `--add-dir <path>`.
 - image / asset / logo / hero / banner / ilustração generation → `--generate-image`
-  (uses AGY's Nano Banana model; pass `--output-dir <assets>` for the destination).
+  (uses AGY's `generate_imagem` tool without changing models; pass `--output-dir <assets>`).
+- named custom agent → `--agent <name>`; use `--interactive` only for a human PTY session.
+- explicit reasoning effort → `--effort low|medium|high` (never infer it from the model slug).
+- live fan-out visibility → `--format stream-json --parallel`.
 
-Example: "use o gemini 3.1 pro e desenvolva um front-end" becomes
-`--model gemini-3.1-pro-high` in agentic mode (no `--read-only`).
+Example: "use o gemini 3.7 flash e desenvolva um front-end" becomes
+`--model gemini-3.7-flash-high` in agentic mode (no `--read-only`).
 
 ## Execution Defaults
 
@@ -90,10 +92,9 @@ native tools (`write_to_file`, `replace_file_content`, `grep_search`,
 
 Use `--read-only` only when the task must not modify files.
 
-For long or noisy outputs, use `--output-file <tmp-path>` and then read the file
-with the `Read` tool. The Bash tool captures stdout via a sandbox pipe that cannot
-handle AGY's async ConPTY output, so `--output-file` is the reliable retrieval
-path.
+Headless execution uses a normal async child process and JSON by default, so stdout is
+reliable. For long or noisy responses, `--output-file <tmp-path>` remains available;
+use `--format stream-json` to expose tool/subagent progress on stderr.
 
 Temp path by platform:
 - Unix/macOS: `/tmp/agy-coder-$$.txt`
@@ -105,7 +106,7 @@ Coding task with a specific model:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
-  --model gemini-3.1-pro-high \
+  --model gemini-3.7-flash-high \
   --output-file "${TMPDIR:-/tmp}/agy-coder-$$.txt" \
   -- "<TASK>"
 ```
@@ -116,7 +117,8 @@ Monorepo frontend task with native Gemini fan-out:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
   --add-dir ./frontend \
   --parallel \
-  --subagent-model gemini-3.5-flash-medium \
+  --format stream-json \
+  --subagent-model gemini-3.7-flash-medium \
   --output-file "${TMPDIR:-/tmp}/agy-coder-$$.txt" \
   -- "<TASK>"
 ```
@@ -139,7 +141,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
   -- "<TASK>"
 ```
 
-Generate a UI asset (Nano Banana model):
+Generate a UI asset (`generate_imagem` tool):
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
@@ -191,7 +193,7 @@ IMAGE_SUGGESTIONS (caller: ask the user via AskUserQuestion, multiSelect; genera
 
 ## Failure Handling
 
-- Exit `10` (QUOTA_EXAUSTED): report the JSON signal and suggest retrying later with `--continue`.
+- Exit `10` (QUOTA_EXAUSTED): report the JSON signal and prefer its exact `--conversation <id>` retry; use `--continue` only when no ID is available.
 - Exit `11` (AUTH_REQUIRED): tell the user to run `agy` once interactively to sign in.
 - Exit `12` (TIMEOUT): suggest `--timeout 15m` or narrowing the task scope.
 - Exit `13` (AGY_MISSING): report the install instructions from the bridge output.

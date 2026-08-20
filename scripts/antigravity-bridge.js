@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -11,7 +11,10 @@ import { resolveDefaultLogPath, logEvent } from "./utils.js";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
-const SUPPORTED_FORMATS = new Set(["text"]);
+const SUPPORTED_FORMATS = new Set(["text", "json", "stream-json"]);
+const SUPPORTED_EFFORTS = new Set(["low", "medium", "high"]);
+const SUPPORTED_MODES = new Set(["plan", "accept-edits"]);
+const MODEL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const KNOWN_BINARY_EXTENSIONS = new Set([
   ".7z",
   ".ai",
@@ -86,6 +89,9 @@ export const EXIT_ERROR = 1;
 // Patterns that identify rate-limit / quota responses in AGY output.
 const QUOTA_PATTERNS = [
   /QUOTA_EXAUSTED/,
+  /individual quota reached/i,
+  /upgrade your subscription/i,
+  /quota reached/i,
   /quota.*exceeded/i,
   /rate.?limit/i,
   /resource.?exhausted/i,
@@ -111,20 +117,18 @@ Options:
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
                              Default: current working directory (added automatically).
   --files <glob,...>         File globs to ingest.
-  --format <text>            Output format. Default: text. (json/stream-json not supported by agy headless mode)
-  --model <name>             Model to use. Written to AGY's ~/.gemini/antigravity-cli/settings.json before
-                             spawn and restored after. AGY has no --model CLI flag; settings.json is the
-                             only headless mechanism.
-                             Available: gemini-3.5-flash-low, gemini-3.5-flash-medium (default),
-                                        gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high,
-                                        claude-4.6-sonnet-thinking, claude-4.6-opus-thinking,
-                                        gpt-oss-120b-medium, nano-banana (image generation),
-                                        auto (selects flash tier by context size)
-                             Natural-language aliases are also accepted and normalized, e.g.
-                             "gemini 3.1 pro" -> gemini-3.1-pro-high, "claude opus" -> claude-4.6-opus-thinking,
-                             "flash" -> gemini-3.5-flash-medium, "sonnet" -> claude-4.6-sonnet-thinking.
-  --generate-image           Generate an image from the task description using AGY's Nano Banana model.
-                             Defaults --model to nano-banana. Compatible with --model to override.
+  --format <format>          Headless output: text, json, or stream-json. Default: json.
+  --model <name>             Model slug or natural-language alias. Resolved dynamically from \`agy models\`.
+                             Omitted when not requested so AGY honors the user's own /model setting.
+                             Use \`auto\` to select a tier from the newest available Flash family.
+  --effort <level>           Reasoning effort: low, medium, or high.
+  --mode <mode>              Permission mode: plan or accept-edits.
+  --json-schema <value>      JSON Schema string or path. Implies --format json.
+  --disable-slash-commands   Treat task text as data (default headless, except --read-only;
+                             AGY 1.1.16 otherwise ignores --mode plan).
+  --allow-slash-commands     Allow slash-command and skill expansion in headless prompts.
+  --generate-image           Generate an image using AGY's generate_imagem tool.
+                             Does not override the selected model.
                              Alias: --generate-imagem.
   --parallel                 Allow AGY to fan the task out across multiple native Gemini subagents
                              (DefineSubagent / invoke_subagent / ManageSubagents). AGY decides how
@@ -134,9 +138,9 @@ Options:
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
-  --agent                    Alias for --interactive; intended for human-at-terminal sessions.
-  --read-only                Disable --dangerously-skip-permissions and workspace auto-add.
-                             Use for analysis-only tasks that must not modify files.
+  --agent <name>             Select an AGY custom agent. Use --interactive for a PTY session.
+  --read-only                Imply --mode plan, disable --dangerously-skip-permissions, and
+                             disable workspace auto-add.
   --continue, -c             Continue the most recent AGY conversation.
   --conversation <id>        Resume a specific AGY conversation.
   --sandbox                  Enable AGY sandbox mode.
@@ -178,6 +182,11 @@ function summarizeParsedArgs(parsed) {
     files: parsed.files,
     format: parsed.format,
     model: parsed.model,
+    effort: parsed.effort,
+    mode: parsed.mode,
+    agent: parsed.agent,
+    jsonSchema: parsed.jsonSchema,
+    disableSlashCommands: parsed.disableSlashCommands,
     timeout: parsed.timeout,
     interactive: parsed.interactive,
     readOnly: parsed.readOnly,
@@ -277,17 +286,46 @@ function takeOptionValue(argv, index, flagName) {
   return value;
 }
 
-// Scans AGY output for quota/auth signals and returns a classification or null.
-export function classifyAgyOutput(output) {
-  if (QUOTA_PATTERNS.some((p) => p.test(output))) {
-    const reasonMatch = output.match(/QUOTA_EXAUSTED\s+reason="([^"]+)"/);
-    const reason = reasonMatch ? reasonMatch[1] : "quota or rate limit reached";
+export function parseAgyJsonResult(stdout) {
+  let envelope;
+  try {
+    envelope = typeof stdout === "string" ? JSON.parse(stdout.trim()) : stdout;
+  } catch (error) {
+    throw new Error(
+      `AGY returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+    throw new Error("AGY returned an invalid JSON envelope.");
+  }
+  return {
+    conversationId: envelope.conversation_id ?? "",
+    status: envelope.status ?? "",
+    response: envelope.response ?? "",
+    error: envelope.error ?? "",
+    durationSeconds: envelope.duration_seconds ?? 0,
+    numTurns: envelope.num_turns ?? 0,
+    usage: envelope.usage ?? undefined,
+  };
+}
+
+// Classifies structured JSON envelopes first. Text scanning is retained only for
+// callers that explicitly select --format text.
+export function classifyAgyOutput(output, { format = "text" } = {}) {
+  const envelope = output && typeof output === "object" ? output : null;
+  const diagnostic = envelope
+    ? `${envelope.status ?? ""}\n${envelope.error ?? ""}`
+    : String(output ?? "");
+  if (!envelope && format !== "text") return null;
+  if (QUOTA_PATTERNS.some((p) => p.test(diagnostic))) {
+    const reasonMatch = diagnostic.match(/QUOTA_EXAUSTED\s+reason="([^"]+)"/);
+    const reason = envelope?.error || (reasonMatch ? reasonMatch[1] : "quota or rate limit reached");
     return { type: "QUOTA_EXAUSTED", reason, exitCode: EXIT_QUOTA_EXAUSTED };
   }
-  if (AUTH_PATTERNS.some((p) => p.test(output))) {
+  if (AUTH_PATTERNS.some((p) => p.test(diagnostic))) {
     return {
       type: "AUTH_REQUIRED",
-      reason: "authentication required — run `agy` once interactively to sign in",
+      reason: envelope?.error || "authentication required — run `agy` once interactively to sign in",
       exitCode: EXIT_AUTH_REQUIRED,
     };
   }
@@ -295,10 +333,16 @@ export function classifyAgyOutput(output) {
 }
 
 // Emits a single machine-readable JSON line that orchestrators / Claude Code can parse.
-// QUOTA_EXAUSTED includes retry:"--continue" so callers know how to resume the session.
-function emitStructuredSignal(type, reason, model, _stdout) {
+// Quota signals include the exact conversation when AGY returned one.
+function emitStructuredSignal(type, reason, model, result, _stdout) {
   const signal = { status: type, reason, model };
-  if (type === "QUOTA_EXAUSTED") signal.retry = "--continue";
+  if (result?.conversationId) signal.conversation_id = result.conversationId;
+  if (result?.usage) signal.usage = result.usage;
+  if (type === "QUOTA_EXAUSTED") {
+    signal.retry = result?.conversationId
+      ? `--conversation ${result.conversationId}`
+      : "--continue";
+  }
   _stdout.write(JSON.stringify(signal) + "\n");
 }
 
@@ -307,8 +351,13 @@ export function parseCliArgs(argv) {
     dirs: [],
     addDirs: [],
     files: [],
-    format: "text",
+    format: "json",
     model: undefined,
+    effort: undefined,
+    mode: undefined,
+    agent: undefined,
+    jsonSchema: undefined,
+    disableSlashCommands: true,
     timeout: undefined,
     interactive: false,
     readOnly: false,
@@ -368,8 +417,47 @@ export function parseCliArgs(argv) {
         index += 1;
         break;
       case "--interactive":
-      case "--agent":
         parsed.interactive = true;
+        break;
+      case "--agent":
+        try {
+          parsed.agent = takeOptionValue(argv, index, token);
+        } catch {
+          throw new Error("Missing value for --agent. Use --interactive for an interactive PTY session.");
+        }
+        index += 1;
+        break;
+      case "--effort": {
+        const effort = takeOptionValue(argv, index, token);
+        if (!SUPPORTED_EFFORTS.has(effort)) {
+          throw new Error(
+            `Unsupported --effort value "${effort}". Expected one of: ${[...SUPPORTED_EFFORTS].join(", ")}`,
+          );
+        }
+        parsed.effort = effort;
+        index += 1;
+        break;
+      }
+      case "--mode": {
+        const mode = takeOptionValue(argv, index, token);
+        if (!SUPPORTED_MODES.has(mode)) {
+          throw new Error(
+            `Unsupported --mode value "${mode}". Expected one of: ${[...SUPPORTED_MODES].join(", ")}`,
+          );
+        }
+        parsed.mode = mode;
+        index += 1;
+        break;
+      }
+      case "--json-schema":
+        parsed.jsonSchema = takeOptionValue(argv, index, token);
+        index += 1;
+        break;
+      case "--disable-slash-commands":
+        parsed.disableSlashCommands = true;
+        break;
+      case "--allow-slash-commands":
+        parsed.disableSlashCommands = false;
         break;
       case "--read-only":
         parsed.readOnly = true;
@@ -444,6 +532,21 @@ export function parseCliArgs(argv) {
 
   if (!parsed.task) {
     parsed.task = taskTokens.join(" ").trim();
+  }
+
+  if (parsed.readOnly) {
+    parsed.mode = "plan";
+    // AGY 1.1.16 warns that --mode plan has no effect while slash expansion is
+    // disabled. Preserve the stronger no-write guarantee for read-only runs.
+    parsed.disableSlashCommands = false;
+  }
+  if (parsed.jsonSchema) parsed.format = "json";
+
+  if (!parsed.help && !parsed.task && parsed.agent) {
+    throw new Error(
+      "--agent now selects a named AGY agent and also requires a task. " +
+        "Use --interactive for an interactive PTY session.",
+    );
   }
 
   if (!parsed.help && !parsed.task) {
@@ -611,7 +714,7 @@ export async function collectContextFiles({
 export function buildParallelismBlock({ parallel = false, subagentModel } = {}) {
   if (!parallel) return "";
   const modelLine = subagentModel
-    ? `- Configure each subagent to use the model "${agyModelLabel(subagentModel)}".\n`
+    ? `- Configure each subagent to use the model "${subagentModel}".\n`
     : "";
   const decompositionVerb = subagentModel ? "MUST" : "MAY";
   const spawnConstraint = subagentModel
@@ -629,7 +732,13 @@ ${modelLine}- Wait for every subagent to finish (poll with ManageSubagents) befo
 </parallelism>`;
 }
 
-export function buildAntigravityPrompt({ task, context, parallel = false, subagentModel }) {
+export function buildAntigravityPrompt({
+  task,
+  context,
+  parallel = false,
+  subagentModel,
+  readOnly = false,
+}) {
   const inventoryLines = [];
 
   if (context.included.length > 0) {
@@ -661,6 +770,18 @@ ${file.content.replaceAll("</", "<\\/")}
           )
           .join("\n\n");
 
+  const executionConstraints = readOnly
+    ? `- You are a read-only analysis assistant. Analyze, inspect, and report without modifying files.
+- Do not call write_to_file, replace_file_content, multi_replace_file_content, or any mutating command.
+- Use grep_search, view_file, list_dir, and read-only run_command operations to inspect the workspace.`
+    : `- You are an agentic coding assistant. Complete the task fully using your available tools.
+- Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
+- Use grep_search, view_file, and list_dir to explore and search the workspace.
+- Use run_command to execute shell commands when needed.`;
+  const completionConstraint = readOnly
+    ? "- Complete the entire analysis without stopping mid-way. Report findings and cited paths at the end."
+    : "- Complete the entire task without stopping mid-way. Report all changes made at the end.";
+
   return `<context_inventory>
 ${inventoryLines.join("\n")}
 </context_inventory>
@@ -674,13 +795,10 @@ ${task}
 </task>
 
 <constraints>
-- You are an agentic coding assistant. Complete the task fully using your available tools.
-- Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
-- Use grep_search, view_file, and list_dir to explore and search the workspace.
-- Use run_command to execute shell commands when needed.
+${executionConstraints}
 - Use the provided inline context when relevant; cite file paths when referencing it.
 - If inline context is partial or truncated, read the full files with view_file before acting.
-- Complete the entire task without stopping mid-way. Report all changes made at the end.
+${completionConstraint}
 - If you hit a quota or rate limit, immediately output on its own line and then stop:
   QUOTA_EXAUSTED reason="<specific reason>" model="<model name>"
 </constraints>${buildParallelismBlock({ parallel, subagentModel })}`;
@@ -743,8 +861,13 @@ ${task}
 
 export function buildAntigravityArgs({
   prompt,
-  model: _model,   // model is applied via settings.json before spawn, not via CLI flag
-  format: _format, // accepted but not forwarded; AGY headless returns text only
+  model,
+  format = "json",
+  effort,
+  mode,
+  agent,
+  jsonSchema,
+  disableSlashCommands = true,
   timeout,
   interactive = false,
   continueConversation = false,
@@ -761,9 +884,16 @@ export function buildAntigravityArgs({
   }
   if (sandbox) args.push("--sandbox");
   if (skipPermissions) args.push("--dangerously-skip-permissions");
+  if (model) args.push("--model", model);
+  if (effort) args.push("--effort", effort);
+  if (mode) args.push("--mode", mode);
+  if (agent) args.push("--agent", agent);
   if (interactive) {
     args.push("--prompt-interactive", prompt);
   } else {
+    args.push("--output-format", format);
+    if (jsonSchema) args.push("--json-schema", jsonSchema);
+    if (disableSlashCommands) args.push("--disable-slash-commands");
     args.push("--print", prompt);
     if (timeout) args.push("--print-timeout", timeout);
   }
@@ -856,63 +986,29 @@ function buildAgyMissingError() {
   return err;
 }
 
-// Selects a model based on total inline context size when --model auto is requested.
-// Larger context → higher Flash tier (more capable, not just faster).
-export function resolveAutoModel(context) {
-  const totalBytes = context.included.reduce((sum, f) => sum + f.bytes, 0);
-  if (totalBytes < 32_768) return "gemini-3.5-flash-low";
-  if (totalBytes < 262_144) return "gemini-3.5-flash-medium";
-  return "gemini-3.5-flash-high";
-}
+// Emergency catalog used only when both the 24-hour cache and `agy models` are unavailable.
+// The runtime catalog remains authoritative.
+export const FALLBACK_MODEL_CATALOG = Object.freeze([
+  { slug: "gemini-3.7-flash-low", label: "Gemini 3.7 Flash (Low)" },
+  { slug: "gemini-3.7-flash-medium", label: "Gemini 3.7 Flash (Medium)" },
+  { slug: "gemini-3.7-flash-high", label: "Gemini 3.7 Flash (High)" },
+  { slug: "gemini-3.6-flash-low", label: "Gemini 3.6 Flash (Low)" },
+  { slug: "gemini-3.6-flash-medium", label: "Gemini 3.6 Flash (Medium)" },
+  { slug: "gemini-3.6-flash-high", label: "Gemini 3.6 Flash (High)" },
+  { slug: "gemini-3.5-flash-low", label: "Gemini 3.5 Flash (Low)" },
+  { slug: "gemini-3.5-flash-medium", label: "Gemini 3.5 Flash (Medium)" },
+  { slug: "gemini-3.5-flash-high", label: "Gemini 3.5 Flash (High)" },
+  { slug: "gemini-3.1-pro-low", label: "Gemini 3.1 Pro (Low)" },
+  { slug: "gemini-3.1-pro-high", label: "Gemini 3.1 Pro (High)" },
+  { slug: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 (Thinking)" },
+  { slug: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (Thinking)" },
+  { slug: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)" },
+]);
 
-// Maps bridge model identifiers to AGY settings.json display labels (confirmed from AGY transcripts).
-// AGY reads the "model" field in settings.json as a human-readable label, not an API identifier.
-const AGY_MODEL_LABELS = {
-  "gemini-3.5-flash-low":      "Gemini 3.5 Flash (Low)",
-  "gemini-3.5-flash-medium":   "Gemini 3.5 Flash (Medium)",
-  "gemini-3.5-flash-high":     "Gemini 3.5 Flash (High)",
-  "gemini-3.1-pro-low":        "Gemini 3.1 Pro (Low)",
-  "gemini-3.1-pro-high":       "Gemini 3.1 Pro (High)",
-  "claude-4.6-sonnet-thinking":"Claude 4.6 Sonnet (Thinking)",
-  "claude-4.6-opus-thinking":  "Claude 4.6 Opus (Thinking)",
-  "gpt-oss-120b-medium":       "GPT-OSS 120B (Medium)",
-  "nano-banana":               "Nano Banana",
-};
-
-// The full set of canonical model identifiers the bridge understands. `auto` is a
-// virtual identifier resolved at runtime from context size (see resolveAutoModel).
-export const CANONICAL_MODELS = new Set([...Object.keys(AGY_MODEL_LABELS), "auto"]);
-
-// Natural-language → canonical identifier map. Claude (the orchestrator) is expected to
-// translate user prose into a canonical --model value, but users and other callers often
-// pass loose names ("gemini 3.1 pro", "claude opus", "flash"). This map normalizes those
-// so the contract still applies the model the prompt actually asked for, instead of
-// silently falling back to the default. Bare family names default to the most capable tier.
-const MODEL_ALIASES = {
-  // Gemini Flash family
-  "flash":                  "gemini-3.5-flash-medium",
-  "gemini-flash":           "gemini-3.5-flash-medium",
-  "gemini-3.5-flash":       "gemini-3.5-flash-medium",
-  // Gemini Pro family
-  "pro":                    "gemini-3.1-pro-high",
-  "gemini-pro":             "gemini-3.1-pro-high",
-  "gemini-3.1-pro":         "gemini-3.1-pro-high",
-  // Claude family
-  "claude":                 "claude-4.6-opus-thinking",
-  "claude-opus":            "claude-4.6-opus-thinking",
-  "opus":                   "claude-4.6-opus-thinking",
-  "claude-4.6-opus":        "claude-4.6-opus-thinking",
-  "claude-sonnet":          "claude-4.6-sonnet-thinking",
-  "sonnet":                 "claude-4.6-sonnet-thinking",
-  "claude-4.6-sonnet":      "claude-4.6-sonnet-thinking",
-  // GPT-OSS family
-  "gpt":                    "gpt-oss-120b-medium",
-  "gpt-oss":                "gpt-oss-120b-medium",
-  "gpt-oss-120b":           "gpt-oss-120b-medium",
-  // Image generation
-  "nano":                   "nano-banana",
-  "banana":                 "nano-banana",
-};
+export const CANONICAL_MODELS = new Set([
+  ...FALLBACK_MODEL_CATALOG.map(({ slug }) => slug),
+  "auto",
+]);
 
 // Lowercases and collapses whitespace, underscores, parentheses, and repeated dashes so
 // that "Gemini 3.1 Pro (High)", "gemini_3.1_pro_high", and "gemini-3.1-pro-high" all
@@ -926,64 +1022,157 @@ function normalizeModelToken(raw) {
     .replace(/^-|-$/g, "");
 }
 
-// Resolves a possibly natural-language model name to a canonical bridge identifier.
-// Returns the canonical id when recognized; otherwise returns the input unchanged so the
-// caller can decide whether to warn. Canonical ids and AGY display labels pass through.
-export function resolveModelAlias(raw) {
+function modelVersion(slug) {
+  const dotted = slug.match(/(\d+)\.(\d+)/);
+  if (dotted) return [Number(dotted[1]), Number(dotted[2])];
+  const dashed = slug.match(/-(\d+)-(\d+)(?:-|$)/);
+  if (dashed) return [Number(dashed[1]), Number(dashed[2])];
+  return [0, 0];
+}
+
+function compareModelsNewestFirst(left, right) {
+  const [leftMajor, leftMinor] = modelVersion(left.slug);
+  const [rightMajor, rightMinor] = modelVersion(right.slug);
+  if (leftMajor !== rightMajor) return rightMajor - leftMajor;
+  if (leftMinor !== rightMinor) return rightMinor - leftMinor;
+  const tierRank = (slug) => slug.endsWith("-high") ? 3 : slug.endsWith("-medium") ? 2 : slug.endsWith("-low") ? 1 : 0;
+  return tierRank(right.slug) - tierRank(left.slug) || left.slug.localeCompare(right.slug);
+}
+
+export function parseAgyModelsOutput(stdout) {
+  const models = [];
+  const seen = new Set();
+  for (const rawLine of String(stdout ?? "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^fetching available models/i.test(line) || /^error:/i.test(line)) continue;
+    const match = line.match(/^([a-z0-9][a-z0-9._-]*)\s+(.*)$/i);
+    if (!match || seen.has(match[1])) continue;
+    seen.add(match[1]);
+    models.push({ slug: match[1], label: match[2].trim() });
+  }
+  return models;
+}
+
+export function resolveModelCachePath() {
+  const home = process.env.USERPROFILE ?? process.env.HOME;
+  if (home) {
+    return path.join(home, ".gemini", "antigravity-cli", "cache", "cc-antigravity-models.json");
+  }
+  return path.join(path.dirname(resolveDefaultLogPath()), "models-cache.json");
+}
+
+export async function resolveModelCatalog({
+  agyExe,
+  _spawnSync = spawnSync,
+  cachePath = resolveModelCachePath(),
+  now = Date.now(),
+  ttlMs = MODEL_CACHE_TTL_MS,
+  _fsp = fsp,
+} = {}) {
+  try {
+    const cached = JSON.parse(await _fsp.readFile(cachePath, "utf8"));
+    if (
+      Number.isFinite(cached.fetchedAt) &&
+      now - cached.fetchedAt < ttlMs &&
+      Array.isArray(cached.models) &&
+      cached.models.length > 0
+    ) {
+      return cached.models;
+    }
+  } catch {
+    // Cache miss, stale cache, or malformed cache: query the CLI.
+  }
+
+  try {
+    const executable = agyExe ?? resolveAgyExe(_spawnSync);
+    const result = _spawnSync(executable, ["models"], {
+      encoding: "utf8",
+      shell: false,
+      timeout: 30_000,
+    });
+    const models = result.status === 0 ? parseAgyModelsOutput(result.stdout) : [];
+    if (models.length > 0) {
+      try {
+        await _fsp.mkdir(path.dirname(cachePath), { recursive: true });
+        await _fsp.writeFile(cachePath, JSON.stringify({ fetchedAt: now, models }, null, 2), "utf8");
+      } catch (error) {
+        logEvent("agy.models.cache.write_failed", {
+          cachePath,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      logEvent("agy.models.catalog", { source: "cli", count: models.length });
+      return models;
+    }
+  } catch (error) {
+    logEvent("agy.models.query_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  logEvent("agy.models.catalog", { source: "fallback", count: FALLBACK_MODEL_CATALOG.length });
+  return FALLBACK_MODEL_CATALOG.map((model) => ({ ...model }));
+}
+
+function familyCandidates(normalized, catalog) {
+  let family;
+  if (normalized.includes("flash")) family = "flash";
+  else if (normalized === "pro" || normalized.includes("gemini-pro") || normalized.includes("-pro")) family = "pro";
+  else if (normalized.includes("opus") || normalized === "claude") family = "opus";
+  else if (normalized.includes("sonnet")) family = "sonnet";
+  else if (normalized === "gpt" || normalized.includes("gpt-oss")) family = "gpt-oss";
+  if (!family) return [];
+
+  let candidates = catalog.filter(({ slug }) => slug.toLowerCase().includes(family));
+  const requestedVersion = normalized.match(/(\d+)[.-](\d+)/);
+  if (requestedVersion) {
+    const [major, minor] = [Number(requestedVersion[1]), Number(requestedVersion[2])];
+    const sameVersion = candidates.filter(({ slug }) => {
+      const version = modelVersion(slug);
+      return version[0] === major && version[1] === minor;
+    });
+    if (sameVersion.length > 0) candidates = sameVersion;
+  }
+  const requestedTier = ["high", "medium", "low"].find((tier) => normalized.includes(tier));
+  if (requestedTier) {
+    const sameTier = candidates.filter(({ slug }) => slug.endsWith(`-${requestedTier}`));
+    if (sameTier.length > 0) candidates = sameTier;
+  }
+  return candidates.sort(compareModelsNewestFirst);
+}
+
+// Resolves slugs and labels against the runtime catalog. Unknown input is returned unchanged
+// so the caller can warn and omit it instead of sending an invalid slug to AGY.
+export function resolveModelAlias(raw, catalog = FALLBACK_MODEL_CATALOG) {
   if (!raw) return raw;
   const norm = normalizeModelToken(raw);
-  if (CANONICAL_MODELS.has(norm)) return norm;
-  if (MODEL_ALIASES[norm]) return MODEL_ALIASES[norm];
+  if (norm === "auto") return "auto";
+  const direct = catalog.find(
+    ({ slug, label }) => normalizeModelToken(slug) === norm || normalizeModelToken(label) === norm,
+  );
+  if (direct) return direct.slug;
+  const [familyMatch] = familyCandidates(norm, catalog);
+  if (familyMatch) return familyMatch.slug;
   return raw;
 }
 
-// True when a resolved model is one the bridge can map to an AGY display label.
-export function isKnownModel(model) {
-  return CANONICAL_MODELS.has(model);
+export function isKnownModel(model, catalog = FALLBACK_MODEL_CATALOG) {
+  return model === "auto" || catalog.some(({ slug }) => slug === model);
 }
 
-// Converts a bridge model identifier to the display label AGY stores in settings.json.
-// Unknown models are passed through as-is (AGY falls back to its default).
-export function agyModelLabel(model) {
-  return AGY_MODEL_LABELS[model] ?? model;
-}
-
-// Returns the path where AGY CLI reads its settings.json.
-// AGY stores its settings at ~/.gemini/antigravity-cli/settings.json on all platforms.
-// AGY has no --model flag; writing the model label here is the only headless override.
-export function resolveAgySettingsPath() {
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
-  return path.join(home, ".gemini", "antigravity-cli", "settings.json");
-}
-
-// Writes the requested model into AGY's settings.json and returns an async restore
-// function that puts the file back to its original state (or removes it if it did
-// not exist). Callers MUST call the returned function in a finally block.
-export async function patchAgySettings(settingsPath, model) {
-  let originalContent = null;
-  try {
-    originalContent = await fsp.readFile(settingsPath, "utf8");
-  } catch {
-    // settings.json does not exist yet; we will create it and remove it on restore
-  }
-  const existing = originalContent ? JSON.parse(originalContent) : {};
-  const label = agyModelLabel(model);
-  await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
-  await fsp.writeFile(settingsPath, JSON.stringify({ ...existing, model: label }, null, 2), "utf8");
-  logEvent("agy.model.patch", { settingsPath, model, label });
-
-  return async () => {
-    try {
-      if (originalContent === null) {
-        await fsp.unlink(settingsPath);
-      } else {
-        await fsp.writeFile(settingsPath, originalContent, "utf8");
-      }
-    } catch {
-      // best-effort; leaving a stale settings.json is preferable to crashing
-    }
-    logEvent("agy.model.unpatch", { settingsPath });
-  };
+// Selects a tier from the newest available Flash family when --model auto is requested.
+export function resolveAutoModel(context, catalog = FALLBACK_MODEL_CATALOG) {
+  const flashModels = catalog.filter(({ slug }) => slug.includes("flash")).sort(compareModelsNewestFirst);
+  if (flashModels.length === 0) return undefined;
+  const newestVersion = modelVersion(flashModels[0].slug);
+  const newestFamily = flashModels.filter(({ slug }) => {
+    const version = modelVersion(slug);
+    return version[0] === newestVersion[0] && version[1] === newestVersion[1];
+  });
+  const totalBytes = context.included.reduce((sum, file) => sum + file.bytes, 0);
+  const tier = totalBytes < 32_768 ? "low" : totalBytes < 262_144 ? "medium" : "high";
+  return newestFamily.find(({ slug }) => slug.endsWith(`-${tier}`))?.slug
+    ?? newestFamily.sort(compareModelsNewestFirst)[0]?.slug;
 }
 
 export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
@@ -1090,6 +1279,168 @@ export async function spawnViaConPty(
   });
 }
 
+function renderStreamProgress(event) {
+  const payload = event.step_update ?? event;
+  if (event.event === "init") {
+    const conversationId = event.conversation_id ?? event.init?.conversation_id;
+    return conversationId ? `[agy] conversation ${conversationId} started` : "[agy] run started";
+  }
+
+  const toolInfo = payload.tool_info;
+  if (toolInfo) {
+    const name = toolInfo.name ?? payload.tool_name ?? "tool";
+    const parameters = toolInfo.parameters && Object.keys(toolInfo.parameters).length > 0
+      ? ` ${JSON.stringify(toolInfo.parameters)}`
+      : "";
+    return `[agy] tool ${name}${parameters}`;
+  }
+
+  const subagentInfo = payload.subagent_info;
+  if (subagentInfo) {
+    const conversationId = subagentInfo.conversation_id ?? "unknown";
+    const logUri = subagentInfo.log_uri ? ` ${subagentInfo.log_uri}` : "";
+    return `[agy] subagent ${conversationId}${logUri}`;
+  }
+
+  return null;
+}
+
+export function createAgyStreamParser({ onProgress = () => {} } = {}) {
+  let buffer = "";
+  let finalResult;
+
+  const consumeLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch (error) {
+      throw new Error(
+        `AGY returned invalid stream-json event: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (event.event === "result" && event.result) {
+      finalResult = parseAgyJsonResult(event.result);
+      return;
+    }
+    const progress = renderStreamProgress(event);
+    if (progress) onProgress(progress, event);
+  };
+
+  return {
+    push(chunk) {
+      buffer += String(chunk);
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) consumeLine(line);
+    },
+    end() {
+      if (buffer.trim()) consumeLine(buffer);
+      buffer = "";
+      return finalResult;
+    },
+  };
+}
+
+export async function spawnHeadless(
+  agyExe,
+  agyArgs,
+  {
+    format = "json",
+    timeoutMs = CONPTY_TIMEOUT_MS,
+    _spawn = spawn,
+    _stdout = process.stdout,
+    _stderr = process.stderr,
+    suppressOutput = false,
+  } = {},
+) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = _spawn(agyExe, agyArgs, {
+        cwd: process.cwd(),
+        env: process.env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const streamParser = format === "stream-json"
+      ? createAgyStreamParser({
+          onProgress: (line) => _stderr.write(line + "\n"),
+        })
+      : null;
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timeoutError = () => {
+      try { child.kill(); } catch { /* already stopped */ }
+      const error = new Error(
+        `agy did not respond within ${timeoutMs / 1000}s.\n` +
+        "Check authentication (run `agy` once interactively) and network connectivity.",
+      );
+      error.code = "ETIMEDOUT";
+      finish(() => reject(error));
+    };
+    let timer = setTimeout(timeoutError, timeoutMs);
+    const heartbeat = () => {
+      clearTimeout(timer);
+      timer = setTimeout(timeoutError, timeoutMs);
+    };
+
+    child.stdout?.on("data", (chunk) => {
+      heartbeat();
+      const text = chunk.toString("utf8");
+      stdoutChunks.push(text);
+      if (shouldLogAgyOutput()) logEvent("agy.output.chunk", { text });
+      if (streamParser) {
+        try {
+          streamParser.push(text);
+        } catch (error) {
+          try { child.kill(); } catch { /* already stopped */ }
+          finish(() => reject(error));
+        }
+      } else if (format === "text" && !suppressOutput) {
+        _stdout.write(text);
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      heartbeat();
+      const text = chunk.toString("utf8");
+      stderrChunks.push(text);
+      _stderr.write(text);
+    });
+    child.on("error", (error) => finish(() => reject(error)));
+    child.on("close", (exitCode) => {
+      finish(() => {
+        let result;
+        try {
+          result = streamParser?.end();
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        resolve({
+          exitCode: exitCode ?? EXIT_ERROR,
+          stdout: stdoutChunks.join(""),
+          stderr: stderrChunks.join(""),
+          result,
+        });
+      });
+    });
+  });
+}
+
 function renderAgyCommand(args) {
   const rendered = ["agy", ...args.map((arg) => JSON.stringify(arg))].join(" ");
   return rendered;
@@ -1147,8 +1498,10 @@ async function copyGeneratedImages(sinceMs, destDir, _stdout = process.stdout) {
 }
 
 export async function main(argv = process.argv.slice(2), {
+  _spawn = spawn,
   _spawnSync = spawnSync,
   _loadNodePty = loadNodePty,
+  _resolveModelCatalog = resolveModelCatalog,
   _conPtyTimeoutMs = CONPTY_TIMEOUT_MS,
   _stdout = process.stdout,
   _stderr = process.stderr,
@@ -1168,31 +1521,37 @@ export async function main(argv = process.argv.slice(2), {
       return EXIT_SUCCESS;
     }
 
-    // When --parallel is active in a non-TTY context (e.g. Bash tool sandbox), ConPTY output
-    // may be lost: subagents finish quickly and the PTY flush races the sandbox pipe close.
-    // Auto-inject a temp output file so output is captured via a single fsp.writeFile at the end.
-    if (parsed.parallel && !parsed.outputFile && !_isTTY) {
-      const tmpDir = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
-      parsed.outputFile = path.join(tmpDir, `agy-parallel-${Date.now()}.txt`);
-      logEvent("bridge.parallel.auto-output-file", { path: parsed.outputFile });
+    const configuredModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL?.trim() || undefined;
+    const modelInput = parsed.model ?? configuredModel;
+    const needsCatalog = Boolean(modelInput || parsed.subagentModel);
+    const modelCatalog = needsCatalog
+      ? await _resolveModelCatalog({ _spawnSync })
+      : FALLBACK_MODEL_CATALOG;
+    let model = modelInput ? resolveModelAlias(modelInput, modelCatalog) : undefined;
+    const modelSource = parsed.model ? "flag" : configuredModel ? "config" : "agy-default";
+    if (modelInput && model !== modelInput) {
+      logEvent("bridge.model.alias", { requested: modelInput, resolved: model });
+    }
+    if (model && model !== "auto" && !isKnownModel(model, modelCatalog)) {
+      const validModels = modelCatalog.map(({ slug }) => slug).join(", ");
+      _stderr.write(
+        `Warning: unrecognized model "${modelInput}". AGY will use its configured default. ` +
+          `Valid models: ${validModels}\n`,
+      );
+      logEvent("bridge.model.unknown", { requested: modelInput, resolved: model });
+      model = undefined;
     }
 
-    const defaultModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ?? "gemini-3.5-flash-medium";
-    // Normalize natural-language / loose model names ("gemini 3.1 pro", "claude opus")
-    // to canonical identifiers so the requested model is actually applied via settings.json.
-    const requestedModel = parsed.model ? resolveModelAlias(parsed.model) : undefined;
-    if (parsed.model && requestedModel !== parsed.model) {
-      logEvent("bridge.model.alias", { requested: parsed.model, resolved: requestedModel });
-    }
-    if (requestedModel && requestedModel !== "auto" && !isKnownModel(requestedModel)) {
+    let subagentModel = parsed.subagentModel
+      ? resolveModelAlias(parsed.subagentModel, modelCatalog)
+      : undefined;
+    if (subagentModel && !isKnownModel(subagentModel, modelCatalog)) {
       _stderr.write(
-        `Warning: unrecognized model "${parsed.model}". Passing it through to AGY unchanged; ` +
-          "if AGY does not recognize the label it will fall back to its default model.\n",
+        `Warning: unrecognized subagent model "${parsed.subagentModel}"; omitting the model hint. ` +
+          `Valid models: ${modelCatalog.map(({ slug }) => slug).join(", ")}\n`,
       );
-      logEvent("bridge.model.unknown", { requested: parsed.model, resolved: requestedModel });
+      subagentModel = undefined;
     }
-    let model = requestedModel ?? (parsed.generateImagem ? "nano-banana" : defaultModel);
-    const modelSource = parsed.model ? "flag" : (parsed.generateImagem ? "generate-imagem-default" : (process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL ? "env" : "default"));
 
     // In agentic mode, automatically add cwd to the AGY workspace when the caller
     // did not specify any --add-dir. This gives AGY access to the project by default.
@@ -1212,7 +1571,7 @@ export async function main(argv = process.argv.slice(2), {
     // Resolve --model auto after context is collected so we know the actual size.
     if (model === "auto") {
       const contextBytes = context.included.reduce((s, f) => s + f.bytes, 0);
-      model = resolveAutoModel(context);
+      model = resolveAutoModel(context, modelCatalog);
       logEvent("bridge.model.resolved", { model, source: "auto", contextBytes });
     } else {
       logEvent("bridge.model.resolved", { model, source: modelSource });
@@ -1228,7 +1587,8 @@ export async function main(argv = process.argv.slice(2), {
           task: parsed.task,
           context,
           parallel: parsed.parallel,
-          subagentModel: parsed.subagentModel ? resolveModelAlias(parsed.subagentModel) : undefined,
+          subagentModel,
+          readOnly: parsed.readOnly,
         });
 
     // Windows CreateProcess limit: ~32,767 chars total. Real prompts (with quotes,
@@ -1252,14 +1612,29 @@ export async function main(argv = process.argv.slice(2), {
         task: parsed.task,
         context: fallbackContext,
         parallel: parsed.parallel,
-        subagentModel: parsed.subagentModel ? resolveModelAlias(parsed.subagentModel) : undefined,
+        subagentModel,
+        readOnly: parsed.readOnly,
       });
     }
 
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
+    let configuredEffort = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_EFFORT?.trim() || undefined;
+    if (configuredEffort && !SUPPORTED_EFFORTS.has(configuredEffort)) {
+      _stderr.write(
+        `Warning: unsupported configured effort "${configuredEffort}"; expected low, medium, or high. ` +
+          "AGY will use its own effort default.\n",
+      );
+      configuredEffort = undefined;
+    }
     const agyArgs = buildAntigravityArgs({
       prompt,
       model,
+      format: parsed.format,
+      effort: parsed.effort ?? configuredEffort,
+      mode: parsed.mode,
+      agent: parsed.agent,
+      jsonSchema: parsed.jsonSchema,
+      disableSlashCommands: parsed.disableSlashCommands,
       timeout,
       interactive: parsed.interactive,
       continueConversation: parsed.continueConversation,
@@ -1279,102 +1654,117 @@ export async function main(argv = process.argv.slice(2), {
     const agyExe = resolveAgyExe(_spawnSync);
     checkAgyConnectivity(agyExe, _spawnSync);
 
-    // Patch AGY settings.json with the resolved model before spawning.
-    // AGY has no --model CLI flag; settings.json is the only headless model override.
-    const shouldPatch = Boolean(parsed.model || parsed.generateImagem || process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL);
-    const restoreAgySettings = shouldPatch
-      ? await patchAgySettings(resolveAgySettingsPath(), model)
-      : null;
-
     const spawnStartMs = Date.now();
-    try {
+
+    if (parsed.interactive) {
       const ptyModule = _loadNodePty();
-
-      if (parsed.interactive) {
-        if (!ptyModule) {
-          throw new Error(
-            "--agent/--interactive requires PTY support (node-pty) which is not available in this environment.\n" +
-              "Use the default headless mode (omit --agent/--interactive) or run AGY directly in an interactive terminal.",
-          );
-        }
-        if (!_isTTY) {
-          logEvent("bridge.interactive.no-tty");
-          _stderr.write(
-            "Warning: --agent/--interactive is running without a terminal (no TTY detected). " +
-              "AGY may hang waiting for user input. " +
-              "Use the default headless mode unless you have an interactive terminal attached.\n",
-          );
-        }
+      if (!ptyModule) {
+        throw new Error(
+          "--interactive requires PTY support (node-pty), which is not available in this environment.\n" +
+            "Use the default headless mode or run AGY directly in an interactive terminal.",
+        );
       }
-
-      if (ptyModule) {
-        const outputChunks = [];
-        // When --output-file is set, suppress streaming to stdout; a single write at
-        // the end is immune to sandbox pipe limits and stdout buffering.
-        const ptyOutputStream = parsed.outputFile ? { write: () => {} } : _stdout;
-        let ptyExitCode;
-        try {
-          ptyExitCode = await spawnViaConPty(
-            agyExe,
-            agyArgs,
-            ptyModule,
-            timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
-            ptyOutputStream,
-            outputChunks,
-          );
-        } catch (err) {
-          if (err?.code === "ENOENT" || String(err).includes("not found")) {
-            throw buildAgyMissingError();
-          }
-          throw err;
-        }
-        const fullOutput = outputChunks.join("");
-        if (parsed.outputFile) {
-          const resolvedOutputFile = path.resolve(parsed.outputFile);
-          await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
-          await fsp.writeFile(resolvedOutputFile, fullOutput, "utf8");
-          logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: fullOutput.length });
-          _stdout.write(resolvedOutputFile + "\n");
-        }
-        const sig = classifyAgyOutput(fullOutput);
-        if (sig) {
-          emitStructuredSignal(sig.type, sig.reason, model, _stdout);
-          logEvent("bridge.classified", { type: sig.type, reason: sig.reason, model, exitCode: sig.exitCode });
-          if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
-          return sig.exitCode;
-        }
-        if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
-        return ptyExitCode;
+      if (!_isTTY) {
+        logEvent("bridge.interactive.no-tty");
+        _stderr.write(
+          "Warning: --interactive is running without a terminal (no TTY detected). " +
+            "AGY may hang waiting for user input.\n",
+        );
       }
-
-      // Fallback for platforms or installs where node-pty is unavailable.
-      logEvent("agy.spawnsync.start", { agyExe, args: summarizeAgyArgs(agyArgs) });
-      const spawnStdio = parsed.outputFile ? "pipe" : "inherit";
-      const result = _spawnSync(agyExe, agyArgs, { stdio: spawnStdio, encoding: "utf8" });
-      if (result.error) {
-        logEvent("agy.spawnsync.error", {
-          code: result.error.code,
-          message: result.error.message,
-        });
-        if (result.error.code === "ENOENT") {
+      const outputChunks = [];
+      const ptyOutputStream = parsed.outputFile ? { write: () => {} } : _stdout;
+      let exitCode;
+      try {
+        exitCode = await spawnViaConPty(
+          agyExe,
+          agyArgs,
+          ptyModule,
+          timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
+          ptyOutputStream,
+          outputChunks,
+        );
+      } catch (error) {
+        if (error?.code === "ENOENT" || String(error).includes("not found")) {
           throw buildAgyMissingError();
         }
-        throw result.error;
+        throw error;
       }
+      const output = outputChunks.join("");
       if (parsed.outputFile) {
         const resolvedOutputFile = path.resolve(parsed.outputFile);
-        const capturedOutput = stripAnsi((result.stdout ?? "") + (result.stderr ?? ""));
         await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
-        await fsp.writeFile(resolvedOutputFile, capturedOutput, "utf8");
-        logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: capturedOutput.length });
+        await fsp.writeFile(resolvedOutputFile, output, "utf8");
         _stdout.write(resolvedOutputFile + "\n");
       }
-      logEvent("agy.spawnsync.exit", { status: result.status ?? 1 });
+      const classification = classifyAgyOutput(output, { format: "text" });
+      if (classification) {
+        emitStructuredSignal(classification.type, classification.reason, model, undefined, _stdout);
+        return classification.exitCode;
+      }
       if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
-      return result.status ?? EXIT_ERROR;
-    } finally {
-      await restoreAgySettings?.();
+      return exitCode;
     }
+
+    let headless;
+    try {
+      headless = await spawnHeadless(agyExe, agyArgs, {
+        format: parsed.format,
+        timeoutMs: timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
+        _spawn,
+        _stdout,
+        _stderr,
+        suppressOutput: Boolean(parsed.outputFile),
+      });
+    } catch (error) {
+      if (error?.code === "ENOENT" || String(error).includes("not found")) {
+        throw buildAgyMissingError();
+      }
+      throw error;
+    }
+
+    let result = headless.result;
+    let response = parsed.format === "text" ? headless.stdout : "";
+    if (parsed.format === "json" && headless.stdout.trim()) {
+      result = parseAgyJsonResult(headless.stdout);
+      response = result.response;
+    } else if (parsed.format === "stream-json") {
+      response = result?.response ?? "";
+    }
+
+    const classification = classifyAgyOutput(
+      result ?? `${headless.stdout}\n${headless.stderr}`,
+      { format: parsed.format },
+    );
+    if (classification) {
+      emitStructuredSignal(classification.type, classification.reason, model, result, _stdout);
+      logEvent("bridge.classified", {
+        type: classification.type,
+        reason: classification.reason,
+        model,
+        conversationId: result?.conversationId,
+        exitCode: classification.exitCode,
+      });
+      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
+      return classification.exitCode;
+    }
+
+    if (parsed.outputFile) {
+      const resolvedOutputFile = path.resolve(parsed.outputFile);
+      await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
+      await fsp.writeFile(resolvedOutputFile, response, "utf8");
+      logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: response.length });
+      _stdout.write(resolvedOutputFile + "\n");
+    } else if (parsed.format !== "text" && response) {
+      _stdout.write(response);
+      if (!response.endsWith("\n")) _stdout.write("\n");
+    }
+
+    if (result?.error && String(result.status).toUpperCase() !== "SUCCESS") {
+      _stderr.write(result.error + (result.error.endsWith("\n") ? "" : "\n"));
+    }
+    if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
+    if (result && String(result.status).toUpperCase() !== "SUCCESS") return EXIT_ERROR;
+    return headless.exitCode;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("bridge.error", { message });

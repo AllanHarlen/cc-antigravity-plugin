@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "3.8.0",
+    "version": "4.0.0",
     "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Use the command/skill path or the antigravity-coder subagent for implementation; the bundled antigravity-agent is read-only analysis only.",
     "author": {
         "name": "Allan Harlen",
@@ -34,14 +34,20 @@
     "requiresExternalTool": {
         "name": "agy",
         "installUrl": "https://antigravity.google/cli/install.sh",
-        "description": "Antigravity CLI (AGY) — Google's long-context agentic coding terminal"
+        "description": "Antigravity CLI (AGY) 1.1.8+ — Google's long-context agentic coding terminal"
     },
     "userConfig": {
         "default_model": {
             "type": "string",
             "title": "Default AGY Model",
-            "description": "Model identifier to use when --model is not specified. Available models: gemini-3.5-flash-low, gemini-3.5-flash-medium (default), gemini-3.5-flash-high, gemini-3.1-pro-low, gemini-3.1-pro-high, claude-4.6-sonnet-thinking, claude-4.6-opus-thinking, gpt-oss-120b-medium, nano-banana (image generation via --generate-image), auto.",
-            "default": "gemini-3.5-flash-medium"
+            "description": "Optional AGY model slug or alias. Leave blank to preserve the user's current AGY /model. The bridge discovers valid models dynamically with `agy models`; `auto` selects a tier from the newest Flash family.",
+            "default": ""
+        },
+        "default_effort": {
+            "type": "string",
+            "title": "Default AGY Reasoning Effort",
+            "description": "Optional native reasoning effort: low, medium, or high. Leave blank to let AGY/model defaults decide.",
+            "default": ""
         },
         "timeout": {
             "type": "string",

@@ -1,7 +1,7 @@
 ---
 description: Invoke the Antigravity (AGY) bridge directly as the canonical agentic coding path; creates, edits, and searches files using AGY's native tools
 allowed-tools: Bash(node *antigravity-bridge.js*), Glob, Read
-argument-hint: "[--model name] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high] [--mode plan|accept-edits] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--interactive] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
@@ -31,18 +31,24 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 
 | Argument | Description | Example |
 |----------|-------------|---------|
-| `--model <name>` | Model to use. Written to AGY's `settings.json` before spawn and restored after. AGY has no `--model` CLI flag. Available: `gemini-3.5-flash-low/medium/high`, `gemini-3.1-pro-low/high`, `claude-4.6-sonnet-thinking`, `claude-4.6-opus-thinking`, `gpt-oss-120b-medium`, `nano-banana` | `--model gemini-3.1-pro-low` |
-| `--generate-image` | Generate an image from the task description using AGY's Nano Banana model. Automatically sets `--model nano-banana` unless overridden with `--model`. | `--generate-image` |
+| `--model <name>` | Native AGY model slug or alias. The bridge discovers `agy models` with a 24-hour cache; omit it to preserve the user's AGY `/model`. | `--model gemini-3.7-flash-high` |
+| `--format <format>` | Headless output: `text`, `json`, or `stream-json` (default: `json`). Stream progress is written to stderr and only the final result to stdout. | `--format stream-json` |
+| `--effort <level>` | Native reasoning effort: `low`, `medium`, or `high`. Only forwarded when explicitly requested. | `--effort high` |
+| `--mode <mode>` | Native permission mode: `plan` or `accept-edits`. | `--mode plan` |
+| `--agent <name>` | Select a custom AGY agent; this is not an interactive-mode alias. | `--agent code-reviewer` |
+| `--json-schema <value>` | Schema string or path for structured output; implies `--format json`. | `--json-schema schema.json` |
+| `--allow-slash-commands` | Re-enable slash-command/skill expansion. Headless prompts disable it by default so task text is data. | `--allow-slash-commands` |
+| `--generate-image` | Ask AGY to use its `generate_imagem` tool. Image generation does not select a synthetic model slug. | `--generate-image` |
 | `--parallel` | Allow AGY to fan the task out across multiple native Gemini subagents. AGY decides how many to spawn based on the task's independent subparts. | `--parallel` |
-| `--subagent-model <name>` | Model the spawned subagents should use (e.g. cheap Flash subagents under a Pro planner). Implies `--parallel`. Defaults to the main model. | `--subagent-model gemini-3.5-flash-medium` |
+| `--subagent-model <name>` | Runtime-resolved model hint for spawned subagents. Implies `--parallel`. | `--subagent-model gemini-3.7-flash-medium` |
 | `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs` |
 | `--add-dir <path>` | Add a directory to AGY's native workspace. Repeatable | `--add-dir src` |
 | `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json"` |
-| `--read-only` | Disable skip-permissions and workspace auto-add (analysis mode) | `--read-only` |
+| `--read-only` | Force native `--mode plan`, disable skip-permissions/workspace auto-add, and keep slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. | `--read-only` |
 | `--continue`, `-c` | Continue the most recent AGY conversation | `--continue` |
 | `--conversation <id>` | Resume a specific AGY conversation | `--conversation abc123` |
 | `--timeout <duration>` | Forward `--print-timeout` to AGY | `--timeout 10m` |
-| `--output-file <path>` | Write the full AGY output to a file instead of streaming to stdout, then read it back. Auto-enabled for `--parallel` in non-TTY contexts | `--output-file out.txt` |
+| `--output-file <path>` | Write the parsed final AGY response to a file instead of stdout. | `--output-file out.txt` |
 | `--output-dir <path>` | Destination directory for generated images (used with `--generate-image`) | `--output-dir ./assets` |
 | `--interactive` | Use AGY `--prompt-interactive` for a human-at-terminal session | `--interactive` |
 | `--sandbox` | Enable AGY sandbox mode | `--sandbox` |
@@ -52,6 +58,7 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 
 - `--dangerously-skip-permissions` is always forwarded (agentic mode)
 - The current working directory is added to AGY's workspace via `--add-dir <cwd>`
+- Headless mode uses `--output-format json --disable-slash-commands`
 - Timeout: 10 minutes (override with `--timeout`)
 
 ## Natural Language → Flags Contract
@@ -68,18 +75,17 @@ also normalizes loose names defensively, but pass the canonical id whenever you 
 
 | User says (natural language) | Pass | Resolves to |
 |------------------------------|------|-------------|
-| "use gemini 3.1 pro", "with Pro" | `--model gemini-3.1-pro-high` | Gemini 3.1 Pro (High) |
-| "gemini 3.1 pro low", "cheap pro" | `--model gemini-3.1-pro-low` | Gemini 3.1 Pro (Low) |
-| "gemini flash", "fast", "flash" | `--model gemini-3.5-flash-medium` | Gemini 3.5 Flash (Medium) |
-| "claude opus", "opus" | `--model claude-4.6-opus-thinking` | Claude 4.6 Opus (Thinking) |
-| "claude sonnet", "sonnet" | `--model claude-4.6-sonnet-thinking` | Claude 4.6 Sonnet (Thinking) |
+| "gemini 3.7 flash", "flash" | `--model gemini-3.7-flash-high` | Newest matching Flash member from `agy models` |
+| "gemini 3.7 flash medium" | `--model gemini-3.7-flash-medium` | Gemini 3.7 Flash (Medium), when available |
+| "claude opus", "opus" | `--model claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) |
+| "claude sonnet", "sonnet" | `--model claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) |
 | "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
 | "pick the model for me" | `--model auto` | Flash tier chosen by context size |
-| (no model mentioned) | omit `--model` | User default → `gemini-3.5-flash-medium` |
+| (no model mentioned) | omit `--model` | Preserve the user's current AGY `/model` |
 
-The bridge writes the resolved model to AGY's `settings.json` before spawning and
-restores it afterwards. If a model name is not recognized, the bridge warns on stderr
-and passes it through unchanged.
+The bridge resolves slugs and display labels against the cached runtime catalog and passes
+the selected slug through AGY's native `--model` flag. It never mutates `settings.json`.
+Unknown models are omitted with a stderr warning that lists the valid runtime slugs.
 
 ### Mode selection (agentic vs read-only)
 
@@ -93,14 +99,14 @@ Choose the mode from the verb in the request:
 
 ### Worked example
 
-Request: *"use o gemini 3.1 pro e desenvolva um front-end"*
+Request: *"use o gemini 3.7 flash e desenvolva um front-end"*
 
-- Model: "gemini 3.1 pro" → `--model gemini-3.1-pro-high`
+- Model: "gemini 3.7 flash" → latest matching Flash slug (currently `gemini-3.7-flash-high`)
 - Verb: "desenvolva" (develop) → agentic (default mode, no `--read-only`)
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
-  --model gemini-3.1-pro-high -- "desenvolva um front-end <detalhes do escopo>"
+  --model gemini-3.7-flash-high -- "desenvolva um front-end <detalhes do escopo>"
 ```
 
 ## Execution Instructions
@@ -132,7 +138,7 @@ Guidance:
 
 When exit code `10` or `11` is returned, a JSON line is written to stdout:
 ```json
-{"status":"QUOTA_EXAUSTED","reason":"quota or rate limit reached","model":"gemini-3.5-flash-medium"}
+{"status":"QUOTA_EXAUSTED","reason":"Individual quota reached","model":"gemini-3.7-flash-high","conversation_id":"...","usage":{},"retry":"--conversation ..."}
 ```
 
 ## Examples
@@ -164,13 +170,13 @@ When exit code `10` or `11` is returned, a JSON line is written to stdout:
 
 ### Parallel subagents (native Gemini fan-out)
 ```bash
-/cc-antigravity-plugin:antigravity --parallel --subagent-model gemini-3.5-flash-medium \
+/cc-antigravity-plugin:antigravity --format stream-json --parallel --subagent-model gemini-3.7-flash-medium \
   create two HTML reports in relatorio/: EV taxes and combustion-car taxes in Brazil
 ```
 AGY decomposes the task and runs the independent reports concurrently via its native
 subagent tools, then aggregates the results and reports each subagent's conversation ID.
 
-### Generate an image (Nano Banana model)
+### Generate an image (`generate_imagem` tool)
 ```bash
 /cc-antigravity-plugin:antigravity --generate-image a futuristic city skyline at sunset
 ```
