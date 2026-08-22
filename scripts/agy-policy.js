@@ -43,6 +43,12 @@ export function buildPolicyContext() {
     "  only the approved ones (one --generate-image call each) and wire them into the components.",
     "",
     "Small one-off edits to local/config files (including this plugin's own files) do not require delegation.",
+    "",
+    "- Precedence: this is the default when no more specific routing applies. An active",
+    "  cc-orchestrador-subagents or cc-executor-subagents run has already resolved a",
+    "  Project_Config (backendExecutor/frontendExecutor) for the work in flight — follow that",
+    "  routing instead of this policy for any task inside that run, including when it assigns",
+    "  back-end or full-stack work to Codex.",
   ].join("\n");
 }
 

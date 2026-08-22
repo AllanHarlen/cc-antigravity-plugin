@@ -212,6 +212,8 @@ $antigravity-integration <tarefa>
 
 **Padrões agênticos:** por padrão, `--dangerously-skip-permissions` é repassado e o cwd é adicionado ao workspace do AGY via `--add-dir`. Use `--read-only` para desativar.
 
+**Trade-off do `--read-only`:** o AGY 1.1.16 ignora `--mode plan` enquanto a expansão de slash-command está desativada, então `--read-only` reativa essa expansão para preservar a garantia mais forte de não-escrita. Isso significa que a expansão de slash-command/skill roda justamente no caminho read-only — o mais usado para analisar conteúdo não confiável de repositório — onde uma execução headless normal a manteria desligada. Não há forma conhecida de neutralizar isso sem enfraquecer a própria garantia de não-escrita que o modo existe para proteger, pois é comportamento do AGY em si, não algo que o bridge interpreta. Prefira `--dirs`/`--add-dir` a colar conteúdo não confiável direto no texto da task ao rodar `--read-only` contra um repositório que você não controla.
+
 ## Modelos disponíveis
 
 O bridge descobre o catálogo atual com `agy models`, mantém cache por 24 horas e
@@ -304,6 +306,8 @@ intencionalmente fora da superfície do bridge nesta versão.
 | `CC_ANTIGRAVITY_LOG_OUTPUT` | Defina como `1` para incluir o output do AGY nos logs |
 
 Log padrão: `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (Windows) ou `~/.local/share/agy/cc-plugin-logs/` (Linux/macOS).
+
+**Conteúdo e retenção:** um arquivo por dia, escrito por `logEvent()` (`scripts/utils.js`), nunca podado automaticamente. Todo evento registra os caminhos de arquivo passados como contexto (`--dirs`/`--files`); com `CC_ANTIGRAVITY_LOG_OUTPUT=1` também registra os chunks brutos de saída do AGY, que podem incluir conteúdo derivado do seu código. Apague arquivos antigos no diretório de log manualmente, ou aponte `CC_ANTIGRAVITY_LOG_PATH` para um local já coberto pela sua própria política de retenção.
 
 ### Teste local com logs em tempo real (Windows)
 

@@ -309,14 +309,24 @@ export function parseAgyJsonResult(stdout) {
   };
 }
 
-// Classifies structured JSON envelopes first. Text scanning is retained only for
-// callers that explicitly select --format text.
-export function classifyAgyOutput(output, { format = "text" } = {}) {
+// Classifies structured JSON envelopes first (scanning only their status/error
+// fields, never the response body, so a successful task that legitimately talks
+// about rate limits or 401s is never misclassified). When there is no envelope —
+// a raw-text caller, or a failed/empty JSON parse upstream — text scanning kicks
+// in, gated by the process's own exit code: a clean exit (0) is never scanned,
+// because the response text itself can discuss the same vocabulary without that
+// being a failure of this call to AGY. When the exit code is unknown and the
+// caller didn't ask for text-format scanning, this preserves the old
+// conservative default of not classifying at all.
+export function classifyAgyOutput(output, { format = "text", exitCode } = {}) {
   const envelope = output && typeof output === "object" ? output : null;
   const diagnostic = envelope
     ? `${envelope.status ?? ""}\n${envelope.error ?? ""}`
     : String(output ?? "");
-  if (!envelope && format !== "text") return null;
+  if (!envelope) {
+    if (exitCode === 0) return null;
+    if (format !== "text" && exitCode == null) return null;
+  }
   if (QUOTA_PATTERNS.some((p) => p.test(diagnostic))) {
     const reasonMatch = diagnostic.match(/QUOTA_EXAUSTED\s+reason="([^"]+)"/);
     const reason = envelope?.error || (reasonMatch ? reasonMatch[1] : "quota or rate limit reached");
@@ -378,6 +388,10 @@ export function parseCliArgs(argv) {
   };
 
   const taskTokens = [];
+  // Tracked separately from parsed.skipPermissions (which the --skip-permissions
+  // case above still mutates immediately) so --read-only can be enforced as a
+  // terminal boundary after the loop, regardless of flag order.
+  let sawSkipPermissionsFlag = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -476,6 +490,7 @@ export function parseCliArgs(argv) {
         break;
       case "--skip-permissions":
         parsed.skipPermissions = true;
+        sawSkipPermissionsFlag = true;
         break;
       case "--format": {
         const format = takeOptionValue(argv, index, token);
@@ -535,7 +550,18 @@ export function parseCliArgs(argv) {
   }
 
   if (parsed.readOnly) {
+    // --read-only is a hard boundary: enforced last, independent of flag order,
+    // so no later --skip-permissions can escalate a run that was requested as
+    // read-only. An explicit conflicting flag is rejected rather than silently
+    // overridden.
+    if (sawSkipPermissionsFlag) {
+      throw new Error(
+        "--read-only cannot be combined with --skip-permissions: that would grant write " +
+          "access in a run requested as read-only.",
+      );
+    }
     parsed.mode = "plan";
+    parsed.skipPermissions = false;
     // AGY 1.1.16 warns that --mode plan has no effect while slash expansion is
     // disabled. Preserve the stronger no-write guarantee for read-only runs.
     parsed.disableSlashCommands = false;
@@ -1117,7 +1143,12 @@ export async function resolveModelCatalog({
 function familyCandidates(normalized, catalog) {
   let family;
   if (normalized.includes("flash")) family = "flash";
-  else if (normalized === "pro" || normalized.includes("gemini-pro") || normalized.includes("-pro")) family = "pro";
+  // Matches "pro", "pro-high", "gemini-pro", and "gemini-pro-high" — i.e. "pro" as a
+  // standalone token bounded by the string edges or a hyphen on either side. A plain
+  // `.includes("-pro")` or `.includes("pro-")` alone missed the router's own
+  // "pro-high"/"pro-low" aliases (adaptive-router.mjs AGY_MODELS), which start with
+  // "pro-" but don't contain "-pro".
+  else if (/(^|-)pro(-|$)/.test(normalized)) family = "pro";
   else if (normalized.includes("opus") || normalized === "claude") family = "opus";
   else if (normalized.includes("sonnet")) family = "sonnet";
   else if (normalized === "gpt" || normalized.includes("gpt-oss")) family = "gpt-oss";
@@ -1196,11 +1227,19 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
   logEvent("agy.connectivity.check", { agyExe, ok, version, exitCode: result.status });
 
   if (!ok) {
-    throw new Error(
+    const diagnostic = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    const err = new Error(
       `Antigravity CLI responded with exit code ${result.status} to --version. ` +
         "It may require authentication — run `agy` once interactively to complete setup.\n" +
         `Binary: ${agyExe}`,
     );
+    // Some AGY builds report an auth failure in the --version output itself; surface
+    // it as EXIT_AUTH_REQUIRED (11) instead of the generic EXIT_ERROR (1) so callers
+    // get the same structured signal they'd get from a task-level auth failure.
+    if (AUTH_PATTERNS.some((p) => p.test(diagnostic))) {
+      err.code = "EAGYAUTHREQUIRED";
+    }
+    throw err;
   }
 }
 
@@ -1604,10 +1643,12 @@ export async function main(argv = process.argv.slice(2), {
         limit: 28_000,
         droppedFiles: context.included.length,
       });
-      _stderr.write(
-        `Warning: prompt (${prompt.length} chars) exceeds Windows CLI limit. ` +
-          `Dropped ${context.included.length} inline file(s); AGY will read them via --add-dir.\n`,
-      );
+      if (context.included.length > 0) {
+        _stderr.write(
+          `Warning: prompt (${prompt.length} chars) exceeds Windows CLI limit. ` +
+            `Dropped ${context.included.length} inline file(s); AGY will read them via --add-dir.\n`,
+        );
+      }
       prompt = buildAntigravityPrompt({
         task: parsed.task,
         context: fallbackContext,
@@ -1615,6 +1656,22 @@ export async function main(argv = process.argv.slice(2), {
         subagentModel,
         readOnly: parsed.readOnly,
       });
+
+      // Dropping inline files only helps when the files themselves pushed the prompt
+      // over the limit. When the task text alone is still over budget, spawning would
+      // fail with an opaque ENAMETOOLONG from the OS. Fail fast here instead, with an
+      // actionable message, matching the 28,000-char delegation budget cc-executor-subagents
+      // enforces on the caller side (skills/executor-subagents/scripts/check-agy-prompt.mjs).
+      if (prompt.length > 28_000) {
+        const error = new Error(
+          `Task text alone produces a ${prompt.length}-char prompt, which exceeds the ` +
+            "28,000-char Windows command-line budget even with no inline files attached. " +
+            "Split the task into independent-deliverable subtasks and delegate them as " +
+            "separate calls instead of one oversized prompt.",
+        );
+        error.code = "EAGYPROMPTOVERFLOW";
+        throw error;
+      }
     }
 
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
@@ -1696,7 +1753,7 @@ export async function main(argv = process.argv.slice(2), {
         await fsp.writeFile(resolvedOutputFile, output, "utf8");
         _stdout.write(resolvedOutputFile + "\n");
       }
-      const classification = classifyAgyOutput(output, { format: "text" });
+      const classification = classifyAgyOutput(output, { format: "text", exitCode });
       if (classification) {
         emitStructuredSignal(classification.type, classification.reason, model, undefined, _stdout);
         return classification.exitCode;
@@ -1724,17 +1781,30 @@ export async function main(argv = process.argv.slice(2), {
 
     let result = headless.result;
     let response = parsed.format === "text" ? headless.stdout : "";
+    // A failed JSON parse most commonly means AGY never produced an envelope at
+    // all — an auth/quota failure surfaced as plain text before it could. Defer
+    // the throw until after classification has a chance to diagnose the real
+    // cause from the raw text; only re-throw the parse error itself when
+    // classification finds nothing (a genuinely malformed/unexpected envelope).
+    let parseError = null;
     if (parsed.format === "json" && headless.stdout.trim()) {
-      result = parseAgyJsonResult(headless.stdout);
-      response = result.response;
+      try {
+        result = parseAgyJsonResult(headless.stdout);
+        response = result.response;
+      } catch (error) {
+        parseError = error instanceof Error ? error : new Error(String(error));
+      }
     } else if (parsed.format === "stream-json") {
       response = result?.response ?? "";
     }
 
     const classification = classifyAgyOutput(
       result ?? `${headless.stdout}\n${headless.stderr}`,
-      { format: parsed.format },
+      { format: parsed.format, exitCode: headless.exitCode },
     );
+    if (!classification && parseError) {
+      throw parseError;
+    }
     if (classification) {
       emitStructuredSignal(classification.type, classification.reason, model, result, _stdout);
       logEvent("bridge.classified", {
@@ -1772,6 +1842,7 @@ export async function main(argv = process.argv.slice(2), {
     _stderr.write(`${message}\nPlugin log: ${logPath}\n`);
     if (error?.code === "ETIMEDOUT") return EXIT_TIMEOUT;
     if (error?.code === "EAGYMISSING") return EXIT_AGY_MISSING;
+    if (error?.code === "EAGYAUTHREQUIRED") return EXIT_AUTH_REQUIRED;
     return EXIT_ERROR;
   }
 }
