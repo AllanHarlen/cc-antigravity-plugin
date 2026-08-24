@@ -187,6 +187,7 @@ $antigravity-integration <task>
 |---|---|
 | `--dirs <path,...>` | Recursively inject directories as inline context in the prompt |
 | `--files <glob,...>` | Inject files matching comma-separated globs |
+| `--priority-files <path,...>` | Relative paths to keep ahead of the `--max-files` cutoff. Without it, files are kept in plain alphabetical order, so a large match set silently drops whatever sorts last. |
 | `--add-dir <path>` | Add directory to AGY's native workspace via `--add-dir`; repeatable |
 | `--model <name>` | Native AGY slug or alias resolved from `agy models`; omitted by default to preserve the user's AGY `/model` |
 | `--format <format>` | `text`, `json`, or `stream-json`; JSON is the headless default |
@@ -202,6 +203,8 @@ $antigravity-integration <task>
 | `--conversation <id>` | Resume a specific AGY conversation by ID |
 | `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |
 | `--output-file <path>` | Write the parsed final response to a file instead of stdout |
+| `--task-file <path>` | Read task text from a file instead of argv. Protects the caller-to-bridge hop from OS command-line limits. Does **not** raise the 28,000-char bridge-to-agy budget below — that limit is on the final `agy --print <prompt>` call, which always goes through argv. Mutually exclusive with `--task`/positional task text. |
+| `--dump-prompt <path>` | Write the exact prompt sent to AGY for this run to `<path>`, plus a JSON sidecar at `<path>.audit.json` with `{ promptChars, limit, degraded, droppedFiles, included, skipped }`. Reflects the real run (post prompt-overflow fallback), not a dry run. Prints `BRIDGE_CONTEXT_REPORT: <path>.audit.json` to stderr. |
 | `--interactive` | Use `--prompt-interactive` with PTY/ConPTY (requires TTY) |
 | `--sandbox` | Enable AGY sandbox mode |
 | `--max-files <n>` | Maximum files injected as inline context. Default: `40` |

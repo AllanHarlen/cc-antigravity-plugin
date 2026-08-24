@@ -134,6 +134,67 @@ test("main --print-command resolves model aliases and forwards modern flags", as
   assert.match(io.stdout, /--json-schema" "schema\.json/);
 });
 
+test("main --dump-prompt writes the effective prompt and an undegraded audit sidecar", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-dump-"));
+  const dumpPath = path.join(tempDir, "prompt.txt");
+
+  const { exitCode } = await runMain([
+    "--print-command",
+    "--dump-prompt", dumpPath,
+    "analyze this",
+  ]);
+
+  assert.equal(exitCode, EXIT_SUCCESS);
+  const written = await fs.readFile(dumpPath, "utf8");
+  assert.match(written, /analyze this/);
+
+  const audit = JSON.parse(await fs.readFile(`${dumpPath}.audit.json`, "utf8"));
+  assert.equal(audit.degraded, false);
+  assert.equal(audit.droppedFiles, 0);
+  assert.equal(audit.limit, 28_000);
+  assert.equal(audit.promptChars, written.length);
+  assert.deepEqual(audit.included, []);
+  assert.deepEqual(audit.skipped, []);
+});
+
+test("main --dump-prompt reports stderr pointer to the audit sidecar", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-dump-stderr-"));
+  const dumpPath = path.join(tempDir, "prompt.txt");
+
+  const { io } = await runMain(["--print-command", "--dump-prompt", dumpPath, "analyze this"]);
+
+  assert.match(io.stderr, /BRIDGE_CONTEXT_REPORT: /);
+  assert.ok(io.stderr.includes(`${dumpPath}.audit.json`));
+});
+
+test("main --dump-prompt marks context as degraded when the Windows prompt-overflow fallback drops files", async (t) => {
+  const originalPlatform = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  t.after(() => Object.defineProperty(process, "platform", { value: originalPlatform }));
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-dump-degraded-"));
+  const bigFile = path.join(tempDir, "big.txt");
+  await fs.writeFile(bigFile, "x".repeat(30_000));
+  const dumpPath = path.join(tempDir, "prompt.txt");
+
+  const { exitCode } = await runMain([
+    "--print-command",
+    "--dump-prompt", dumpPath,
+    "--dirs", tempDir,
+    "analyze this",
+  ]);
+
+  assert.equal(exitCode, EXIT_SUCCESS);
+  const audit = JSON.parse(await fs.readFile(`${dumpPath}.audit.json`, "utf8"));
+  assert.equal(audit.degraded, true);
+  assert.equal(audit.droppedFiles, 1);
+  assert.deepEqual(audit.included, []);
+  assert.ok(
+    audit.skipped.some((entry) => entry.reason === "prompt-overflow-windows"),
+    "dropped file must be recorded with the overflow reason",
+  );
+});
+
 test("main --read-only emits --mode plan and never skip-permissions", async () => {
   const { io } = await runMain(["--read-only", "--print-command", "analyze"]);
   assert.match(io.stdout, /--mode" "plan/);

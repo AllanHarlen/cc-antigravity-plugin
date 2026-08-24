@@ -113,10 +113,19 @@ const USAGE = `Usage:
 
 Options:
   --task <text>              Explicit task text.
+  --task-file <path>         Read task text from a file instead of argv. Protects the
+                             caller-to-bridge hop from OS command-line limits. Does NOT
+                             raise the 28,000-char bridge-to-agy budget below (that limit
+                             is on the final \`agy --print <prompt>\` invocation, which
+                             always goes through argv). Mutually exclusive with --task
+                             and positional task text.
   --dirs <path,...>          Directories to ingest recursively.
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
                              Default: current working directory (added automatically).
   --files <glob,...>         File globs to ingest.
+  --priority-files <path,...> Relative paths to prioritize before the --max-files cutoff.
+                             Without this, files are kept in plain alphabetical order, so
+                             a large match set silently drops whichever paths sort last.
   --format <format>          Headless output: text, json, or stream-json. Default: json.
   --model <name>             Model slug or natural-language alias. Resolved dynamically from \`agy models\`.
                              Omitted when not requested so AGY honors the user's own /model setting.
@@ -152,6 +161,11 @@ Options:
                              Designed for callers that use the Read tool: pass this flag,
                              get the path back from the Bash tool, then Read the file.
                              Immune to sandbox pipe limits and stdout buffering.
+  --dump-prompt <path>       Write the exact prompt sent to AGY for this run to <path>,
+                             plus a JSON sidecar at "<path>.audit.json" with
+                             { promptChars, limit, degraded, droppedFiles, included, skipped }.
+                             Reflects the real run (post prompt-overflow fallback), not a
+                             dry run. Prints "BRIDGE_CONTEXT_REPORT: <path>" to stderr.
   --print-command            Print the resolved agy command and exit.
   -h, --help                 Show this help message.
 
@@ -180,6 +194,9 @@ function summarizeParsedArgs(parsed) {
     dirs: parsed.dirs,
     addDirs: parsed.addDirs,
     files: parsed.files,
+    priorityFiles: parsed.priorityFiles,
+    taskFile: parsed.taskFile,
+    dumpPromptPath: parsed.dumpPromptPath,
     format: parsed.format,
     model: parsed.model,
     effort: parsed.effort,
@@ -361,6 +378,9 @@ export function parseCliArgs(argv) {
     dirs: [],
     addDirs: [],
     files: [],
+    priorityFiles: [],
+    taskFile: undefined,
+    dumpPromptPath: undefined,
     format: "json",
     model: undefined,
     effort: undefined,
@@ -410,6 +430,10 @@ export function parseCliArgs(argv) {
         parsed.task = takeOptionValue(argv, index, token);
         index += 1;
         break;
+      case "--task-file":
+        parsed.taskFile = takeOptionValue(argv, index, token);
+        index += 1;
+        break;
       case "--dirs":
         parsed.dirs.push(...splitList(takeOptionValue(argv, index, token)));
         index += 1;
@@ -420,6 +444,14 @@ export function parseCliArgs(argv) {
         break;
       case "--files":
         parsed.files.push(...splitList(takeOptionValue(argv, index, token)));
+        index += 1;
+        break;
+      case "--priority-files":
+        parsed.priorityFiles.push(...splitList(takeOptionValue(argv, index, token)));
+        index += 1;
+        break;
+      case "--dump-prompt":
+        parsed.dumpPromptPath = takeOptionValue(argv, index, token);
         index += 1;
         break;
       case "--model":
@@ -549,6 +581,23 @@ export function parseCliArgs(argv) {
     parsed.task = taskTokens.join(" ").trim();
   }
 
+  if (parsed.taskFile) {
+    if (parsed.task) {
+      throw new Error("Use either --task-file or an explicit task/--task, not both.");
+    }
+    let fileContent;
+    try {
+      fileContent = fs.readFileSync(path.resolve(parsed.taskFile), "utf8");
+    } catch (error) {
+      throw new Error(
+        `Failed to read --task-file "${parsed.taskFile}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    parsed.task = fileContent;
+  }
+
   if (parsed.readOnly) {
     // --read-only is a hard boundary: enforced last, independent of flag order,
     // so no later --skip-permissions can escalate a run that was requested as
@@ -657,6 +706,7 @@ export async function collectContextFiles({
   patterns = [],
   maxFiles,
   maxFileBytes,
+  priorityPaths = [],
 }) {
   const workspaceRoot = path.resolve(cwd);
   const allMatches = new Set();
@@ -673,11 +723,22 @@ export async function collectContextFiles({
 
   const included = [];
   const skipped = [];
-  const sortedMatches = [...allMatches].sort((left, right) => left.localeCompare(right));
 
-  for (const absolutePath of sortedMatches) {
-    const relativePath = relativeToCwd(cwd, absolutePath);
+  // Priority ranking runs before the max-files cutoff so a caller can protect files
+  // it already knows matter (e.g. from the task classification) from being dropped by
+  // plain alphabetical order. With no priorityPaths, every match ranks equally and the
+  // result is identical to a pure localeCompare sort — unchanged default behavior.
+  const prioritySet = new Set(priorityPaths.map((entry) => normalizeSlashes(entry)));
+  const rankedMatches = [...allMatches]
+    .map((absolutePath) => ({ absolutePath, relativePath: relativeToCwd(cwd, absolutePath) }))
+    .sort((left, right) => {
+      const leftRank = prioritySet.has(left.relativePath) ? 0 : 1;
+      const rightRank = prioritySet.has(right.relativePath) ? 0 : 1;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.relativePath.localeCompare(right.relativePath);
+    });
 
+  for (const { absolutePath, relativePath } of rankedMatches) {
     if (isIgnoredPath(relativePath)) {
       skipped.push({ path: relativePath, reason: "ignored-path" });
       continue;
@@ -1604,6 +1665,7 @@ export async function main(argv = process.argv.slice(2), {
       patterns: parsed.files,
       maxFiles: parsed.maxFiles,
       maxFileBytes: parsed.maxFileBytes,
+      priorityPaths: parsed.priorityFiles,
     });
     logEvent("bridge.context.collected", summarizeContext(context));
 
@@ -1633,11 +1695,17 @@ export async function main(argv = process.argv.slice(2), {
     // Windows CreateProcess limit: ~32,767 chars total. Real prompts (with quotes,
     // backslashes, XML) break at ~29,140 raw chars after Node.js arg encoding.
     // When exceeded, drop inline file content and let AGY read via --add-dir tools.
+    let promptDegraded = false;
+    let promptDroppedFiles = 0;
+    let auditSkipped = context.skipped;
     if (process.platform === "win32" && prompt.length > 28_000 && !parsed.generateImagem) {
       const fallbackContext = {
         included: [],
         skipped: context.included.map((f) => ({ path: f.path, reason: "prompt-overflow-windows" })),
       };
+      promptDegraded = context.included.length > 0;
+      promptDroppedFiles = context.included.length;
+      auditSkipped = context.skipped.concat(fallbackContext.skipped);
       logEvent("bridge.prompt.overflow", {
         promptLength: prompt.length,
         limit: 28_000,
@@ -1672,6 +1740,29 @@ export async function main(argv = process.argv.slice(2), {
         error.code = "EAGYPROMPTOVERFLOW";
         throw error;
       }
+    }
+
+    if (parsed.dumpPromptPath) {
+      const resolvedDumpPath = path.resolve(parsed.dumpPromptPath);
+      const auditPath = `${resolvedDumpPath}.audit.json`;
+      fs.writeFileSync(resolvedDumpPath, prompt, "utf8");
+      const auditPayload = {
+        promptChars: prompt.length,
+        limit: 28_000,
+        degraded: promptDegraded,
+        droppedFiles: promptDroppedFiles,
+        included: promptDegraded
+          ? []
+          : context.included.map((f) => ({ path: f.path, bytes: f.bytes, truncated: f.truncated })),
+        skipped: auditSkipped,
+      };
+      fs.writeFileSync(auditPath, JSON.stringify(auditPayload, null, 2), "utf8");
+      _stderr.write(`BRIDGE_CONTEXT_REPORT: ${auditPath}\n`);
+      logEvent("bridge.prompt.dumped", {
+        path: resolvedDumpPath,
+        promptChars: prompt.length,
+        degraded: promptDegraded,
+      });
     }
 
     const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;

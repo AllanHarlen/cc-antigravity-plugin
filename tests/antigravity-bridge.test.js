@@ -45,6 +45,9 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     dirs: ["src", "lib"],
     addDirs: [],
     files: ["**/*.json", "docs/**/*.md"],
+    priorityFiles: [],
+    taskFile: undefined,
+    dumpPromptPath: undefined,
     format: "text",
     model: undefined,
     effort: undefined,
@@ -387,6 +390,43 @@ test("parseCliArgs --dirs accumulates across multiple flags", () => {
   assert.deepEqual(parsed.dirs, ["a", "b", "c", "d"]);
 });
 
+test("parseCliArgs --priority-files accumulates and splits on commas", () => {
+  const parsed = parseCliArgs([
+    "--priority-files", "src/services/a.ts,src/services/b.ts",
+    "--priority-files", "src/api/c.ts",
+    "task",
+  ]);
+  assert.deepEqual(parsed.priorityFiles, ["src/services/a.ts", "src/services/b.ts", "src/api/c.ts"]);
+});
+
+test("parseCliArgs --dump-prompt captures the sidecar path", () => {
+  const parsed = parseCliArgs(["--dump-prompt", "out/prompt.txt", "task"]);
+  assert.equal(parsed.dumpPromptPath, "out/prompt.txt");
+});
+
+test("parseCliArgs --task-file reads task text from disk instead of argv", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-taskfile-"));
+  const taskFile = path.join(tempDir, "task.md");
+  await fs.writeFile(taskFile, "Implement the thing.\nWith two lines.\n");
+
+  const parsed = parseCliArgs(["--task-file", taskFile]);
+  assert.equal(parsed.task, "Implement the thing.\nWith two lines.\n");
+});
+
+test("parseCliArgs throws when --task-file is combined with an explicit task", () => {
+  assert.throws(
+    () => parseCliArgs(["--task-file", "task.md", "also this text"]),
+    /either --task-file or an explicit task/i,
+  );
+});
+
+test("parseCliArgs throws a clear error when --task-file points at a missing file", () => {
+  assert.throws(
+    () => parseCliArgs(["--task-file", "does/not/exist.md"]),
+    /Failed to read --task-file/,
+  );
+});
+
 test("parseCliArgs throws when no task and no --help", () => {
   assert.throws(() => parseCliArgs([]), /task is required/i);
 });
@@ -485,6 +525,48 @@ test("collectContextFiles skips files beyond maxFiles with correct reason", asyn
   assert.equal(context.included.length, 3);
   assert.equal(context.skipped.length, 2);
   assert.ok(context.skipped.every((s) => s.reason === "max-files-exceeded"));
+});
+
+test("collectContextFiles keeps priorityPaths ahead of the max-files cutoff", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-priority-"));
+  // Alphabetically these sort a, b, c, d, e — plain sort would keep a/b/c and
+  // drop d/e. Prioritizing "e.txt" must save it from the cutoff.
+  for (const name of ["a", "b", "c", "d", "e"]) {
+    await fs.writeFile(path.join(tempDir, `${name}.txt`), `content ${name}`);
+  }
+
+  const context = await collectContextFiles({
+    cwd: tempDir,
+    patterns: ["*.txt"],
+    maxFiles: 3,
+    maxFileBytes: 1024,
+    priorityPaths: ["e.txt"],
+  });
+
+  const includedPaths = context.included.map((f) => f.path).sort();
+  assert.equal(context.included.length, 3);
+  assert.ok(includedPaths.includes("e.txt"), "prioritized file must survive the cutoff");
+  const skippedPaths = context.skipped.map((f) => f.path);
+  assert.ok(!skippedPaths.includes("e.txt"));
+});
+
+test("collectContextFiles with no priorityPaths preserves plain alphabetical order (unchanged default)", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-noprio-"));
+  for (const name of ["a", "b", "c", "d", "e"]) {
+    await fs.writeFile(path.join(tempDir, `${name}.txt`), `content ${name}`);
+  }
+
+  const context = await collectContextFiles({
+    cwd: tempDir,
+    patterns: ["*.txt"],
+    maxFiles: 3,
+    maxFileBytes: 1024,
+  });
+
+  assert.deepEqual(
+    context.included.map((f) => f.path).sort(),
+    ["a.txt", "b.txt", "c.txt"],
+  );
 });
 
 test("collectContextFiles skips .txt file containing null byte as binary", async () => {
