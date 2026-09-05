@@ -84,15 +84,16 @@ agy --print "what is 2+2"
 # Adiciona o repositório GitHub como fonte de marketplace
 claude plugin marketplace add AllanHarlen/cc-antigravity-plugin
 
-# Instala o plugin
-claude plugin install cc-antigravity-plugin@AllanHarlen/cc-antigravity-plugin
+# Instala o plugin — o nome depois do "@" é o nome interno do marketplace
+# (definido em marketplace.json), não o caminho "owner/repo" do GitHub
+claude plugin install cc-antigravity-plugin@cc-antigravity-plugin
 ```
 
 **Via slash command (dentro do Claude Code):**
 
 ```
 /plugin marketplace add AllanHarlen/cc-antigravity-plugin
-/plugin install cc-antigravity-plugin@AllanHarlen/cc-antigravity-plugin
+/plugin install cc-antigravity-plugin@cc-antigravity-plugin
 ```
 
 **Para testar uma cópia local do repositório:**
