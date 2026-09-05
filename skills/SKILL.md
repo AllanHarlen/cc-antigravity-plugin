@@ -41,7 +41,8 @@ the canonical id whenever you can.
 
 | User says (natural language) | Pass | Resolves to |
 |------------------------------|------|-------------|
-| "gemini 3.7 flash", "flash" | `--model gemini-3.7-flash-high` | Newest matching Flash member from `agy models` |
+| "flash" | `--model gemini-3.8-flash-high` | Newest matching Flash member from `agy models` |
+| "gemini 3.7 flash" | `--model gemini-3.7-flash-high` | Version pinned; newest tier within that family |
 | "gemini 3.7 flash medium" | `--model gemini-3.7-flash-medium` | Gemini 3.7 Flash (Medium), when available |
 | "claude opus", "opus" | `--model claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) |
 | "claude sonnet", "sonnet" | `--model claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) |

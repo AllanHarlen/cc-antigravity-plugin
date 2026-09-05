@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # Live drift check against the real `agy` CLI. Requires a self-hosted runner with
+  # an authenticated `agy` installed; GitHub-hosted runners don't have it, so this
+  # job is manual-only and never blocks a PR.
+  live-drift-check:
+    if: false
+    runs-on: [self-hosted, agy]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+        env:
+          AGY_LIVE: "1"

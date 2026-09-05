@@ -18,6 +18,7 @@ import {
   parseAgyJsonResult,
   parseAgyModelsOutput,
   parseCliArgs,
+  parseTimeoutMs,
   resolveAgyExe,
   resolveAutoModel,
   resolveModelCatalog,
@@ -27,6 +28,31 @@ import {
   EXIT_QUOTA_EXAUSTED,
   EXIT_AUTH_REQUIRED,
 } from "../scripts/antigravity-bridge.js";
+
+test("parseTimeoutMs accepts a bare millisecond count", () => {
+  assert.equal(parseTimeoutMs("5000"), 5000);
+});
+
+test("parseTimeoutMs accepts single-unit durations", () => {
+  assert.equal(parseTimeoutMs("500ms"), 500);
+  assert.equal(parseTimeoutMs("30s"), 30_000);
+  assert.equal(parseTimeoutMs("5m"), 300_000);
+  assert.equal(parseTimeoutMs("1h"), 3_600_000);
+});
+
+test("parseTimeoutMs accepts compound Go-style durations", () => {
+  assert.equal(parseTimeoutMs("5m0s"), 300_000);
+  assert.equal(parseTimeoutMs("5m30s"), 330_000);
+  assert.equal(parseTimeoutMs("1h30m"), 5_400_000);
+  assert.equal(parseTimeoutMs("1h2m3s"), 3_723_000);
+});
+
+test("parseTimeoutMs falls back to the default on unparseable input", () => {
+  assert.equal(parseTimeoutMs("5m30x"), 600_000);
+  assert.equal(parseTimeoutMs("garbage"), 600_000);
+  assert.equal(parseTimeoutMs(""), 600_000);
+  assert.equal(parseTimeoutMs(undefined), 600_000);
+});
 
 test("parseCliArgs parses dirs, files, and positional task", () => {
   const parsed = parseCliArgs([
@@ -666,30 +692,49 @@ test("resolveAgyExe returns the first discovered agy executable", () => {
 });
 
 // ─── resolveAutoModel ────────────────────────────────────────────────────────
+//
+// These tests pass an explicit fixture catalog rather than relying on
+// FALLBACK_MODEL_CATALOG's default (live) contents, so a future catalog
+// update (a new Gemini Flash generation, say) never requires rewriting these
+// assertions — only the tests that specifically assert on the live default
+// need updating then.
+const AUTO_MODEL_FIXTURE_CATALOG = Object.freeze([
+  { slug: "gemini-9.9-flash-low", label: "Gemini 9.9 Flash (Low)" },
+  { slug: "gemini-9.9-flash-medium", label: "Gemini 9.9 Flash (Medium)" },
+  { slug: "gemini-9.9-flash-high", label: "Gemini 9.9 Flash (High)" },
+  { slug: "gemini-9.8-flash-low", label: "Gemini 9.8 Flash (Low)" },
+]);
 
 test("resolveAutoModel returns flash-low for small context", () => {
   const ctx = { included: [{ bytes: 10_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-low");
+  assert.equal(resolveAutoModel(ctx, AUTO_MODEL_FIXTURE_CATALOG), "gemini-9.9-flash-low");
 });
 
 test("resolveAutoModel returns flash-medium for typical context", () => {
   const ctx = { included: [{ bytes: 100_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-medium");
+  assert.equal(resolveAutoModel(ctx, AUTO_MODEL_FIXTURE_CATALOG), "gemini-9.9-flash-medium");
 });
 
 test("resolveAutoModel returns flash-high for large context", () => {
   const ctx = { included: [{ bytes: 300_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-high");
+  assert.equal(resolveAutoModel(ctx, AUTO_MODEL_FIXTURE_CATALOG), "gemini-9.9-flash-high");
 });
 
 test("resolveAutoModel sums bytes across multiple included files", () => {
   const ctx = { included: [{ bytes: 100_000 }, { bytes: 200_000 }], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-high");
+  assert.equal(resolveAutoModel(ctx, AUTO_MODEL_FIXTURE_CATALOG), "gemini-9.9-flash-high");
 });
 
 test("resolveAutoModel returns flash-low for empty context", () => {
   const ctx = { included: [], skipped: [] };
-  assert.equal(resolveAutoModel(ctx), "gemini-3.7-flash-low");
+  assert.equal(resolveAutoModel(ctx, AUTO_MODEL_FIXTURE_CATALOG), "gemini-9.9-flash-low");
+});
+
+test("resolveAutoModel selects the newest flash family from the live default catalog", () => {
+  // Pins only that resolveAutoModel tracks FALLBACK_MODEL_CATALOG's current
+  // newest family — updated whenever the catalog gains a newer generation.
+  const ctx = { included: [{ bytes: 10_000 }], skipped: [] };
+  assert.equal(resolveAutoModel(ctx), "gemini-3.8-flash-low");
 });
 
 test("spawnViaConPty streams chunks incrementally", async () => {
@@ -842,8 +887,11 @@ test("parseAgyModelsOutput parses slug and display label columns", () => {
 
 test("resolveModelAlias resolves labels and families against the newest runtime catalog member", () => {
   assert.equal(resolveModelAlias("Gemini 3.7 Flash (Medium)"), "gemini-3.7-flash-medium");
+  // Explicit version is preserved regardless of the catalog's newest family.
   assert.equal(resolveModelAlias("gemini 3.7 flash"), "gemini-3.7-flash-high");
-  assert.equal(resolveModelAlias("flash"), "gemini-3.7-flash-high");
+  // Family-only alias tracks the newest family in the live default catalog —
+  // update this alongside FALLBACK_MODEL_CATALOG whenever a newer generation ships.
+  assert.equal(resolveModelAlias("flash"), "gemini-3.8-flash-high");
   assert.equal(resolveModelAlias("opus"), "claude-opus-4-6-thinking");
   assert.equal(resolveModelAlias("sonnet"), "claude-sonnet-4-6");
   assert.equal(resolveModelAlias("gpt oss"), "gpt-oss-120b-medium");
@@ -897,7 +945,15 @@ test("resolveModelCatalog falls back when agy models is unavailable", async () =
   assert.deepEqual(models, FALLBACK_MODEL_CATALOG);
 });
 
+// Gated behind AGY_LIVE=1: this test shells out to the real `agy` CLI (a real
+// network call, ~5s), so a routine `npm test` must stay hermetic and fast. Run
+// it explicitly (`AGY_LIVE=1 npm test`) or via the live-drift-check CI job on
+// a self-hosted runner with an authenticated `agy` installed.
 test("installed agy model catalog is covered by the emergency fallback", (t) => {
+  if (process.env.AGY_LIVE !== "1") {
+    t.skip("set AGY_LIVE=1 to run this test against the real agy CLI");
+    return;
+  }
   const result = spawnSync("agy", ["models"], { encoding: "utf8", shell: false, timeout: 30_000 });
   const installed = result.status === 0 ? parseAgyModelsOutput(result.stdout) : [];
   if (installed.length === 0) {

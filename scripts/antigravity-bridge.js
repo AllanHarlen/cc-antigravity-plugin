@@ -1049,16 +1049,27 @@ export function stripAnsi(raw) {
 // 10 minutes: agentic coding tasks routinely take longer than the old 2-minute default.
 const CONPTY_TIMEOUT_MS = 600_000;
 
-function parseTimeoutMs(timeout) {
+// Accepts a bare number of milliseconds ("5000"), a single unit ("5m", "30s",
+// "1h", "500ms"), or a compound Go-style duration ("5m30s", "1h30m", "5m0s").
+// Unparseable input (garbage, empty compound) falls back to CONPTY_TIMEOUT_MS.
+const TIMEOUT_UNIT_MS = { h: 3_600_000, m: 60_000, s: 1_000, ms: 1 };
+const TIMEOUT_TOKEN_PATTERN = /(\d+)(ms|h|m|s)/g;
+
+export function parseTimeoutMs(timeout) {
   if (!timeout) return CONPTY_TIMEOUT_MS;
-  const match = String(timeout).trim().match(/^(\d+)(ms|s|m|h)?(?:0s)?$/);
-  if (!match) return CONPTY_TIMEOUT_MS;
-  const value = Number.parseInt(match[1], 10);
-  const unit = match[2] ?? "ms";
-  if (unit === "h") return value * 60 * 60 * 1000;
-  if (unit === "m") return value * 60 * 1000;
-  if (unit === "s") return value * 1000;
-  return value;
+  const str = String(timeout).trim();
+  if (/^\d+$/.test(str)) return Number.parseInt(str, 10);
+
+  let totalMs = 0;
+  let matchedLength = 0;
+  for (const match of str.matchAll(TIMEOUT_TOKEN_PATTERN)) {
+    totalMs += Number.parseInt(match[1], 10) * TIMEOUT_UNIT_MS[match[2]];
+    matchedLength += match[0].length;
+  }
+  // Every character of the input must belong to a matched token — a partial
+  // match (e.g. "5m30x") is treated as unparseable, not silently truncated.
+  if (matchedLength === 0 || matchedLength !== str.length) return CONPTY_TIMEOUT_MS;
+  return totalMs;
 }
 
 function buildAgyMissingError() {
@@ -1076,6 +1087,9 @@ function buildAgyMissingError() {
 // Emergency catalog used only when both the 24-hour cache and `agy models` are unavailable.
 // The runtime catalog remains authoritative.
 export const FALLBACK_MODEL_CATALOG = Object.freeze([
+  { slug: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+  { slug: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" },
+  { slug: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
   { slug: "gemini-3.7-flash-low", label: "Gemini 3.7 Flash (Low)" },
   { slug: "gemini-3.7-flash-medium", label: "Gemini 3.7 Flash (Medium)" },
   { slug: "gemini-3.7-flash-high", label: "Gemini 3.7 Flash (High)" },
@@ -1090,11 +1104,6 @@ export const FALLBACK_MODEL_CATALOG = Object.freeze([
   { slug: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 (Thinking)" },
   { slug: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (Thinking)" },
   { slug: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)" },
-]);
-
-export const CANONICAL_MODELS = new Set([
-  ...FALLBACK_MODEL_CATALOG.map(({ slug }) => slug),
-  "auto",
 ]);
 
 // Lowercases and collapses whitespace, underscores, parentheses, and repeated dashes so
@@ -1304,6 +1313,23 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
   }
 }
 
+// A plain `child.kill()`/`term.kill()` sends SIGTERM only to the direct child.
+// On Windows that never reaches grandchildren (agy's own tool subprocesses:
+// node, git, test runners), which are orphaned on timeout. `taskkill /T /F`
+// kills the whole process tree; on POSIX we fall back to the direct kill,
+// since the child was not spawned in its own process group.
+function killProcessTree(pid, fallbackKill) {
+  if (!pid) return;
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      shell: false,
+    });
+    if (result.status === 0) return;
+  }
+  try { fallbackKill(); } catch { /* already stopped */ }
+}
+
 // PTY merges stdout and stderr into a single stream by design; agy error output
 // (auth failures, rate limits) will appear in the same stream as the response body.
 // outputAccumulator, if provided, receives each clean chunk for post-run classification.
@@ -1342,8 +1368,15 @@ export async function spawnViaConPty(
 
     // Heartbeat: the timer resets on every output chunk. It only fires if AGY goes
     // completely silent for timeoutMs — i.e. stalls, not just runs slowly.
+    // `settled` guards against a chunk arriving after timeout/exit already
+    // resolved the promise: without it, a late `onData` call after rejection
+    // rearms a fresh timeoutMs timer that keeps the event loop alive with no
+    // way to ever fire usefully again.
+    let settled = false;
     const timeoutFn = () => {
-      try { term.kill(); } catch { /* already dead */ }
+      if (settled) return;
+      settled = true;
+      killProcessTree(term.pid, () => term.kill());
       logEvent("agy.conpty.timeout", { timeoutMs });
       const timeoutErr = new Error(
         `agy did not respond within ${timeoutMs / 1000}s.\n` +
@@ -1355,6 +1388,7 @@ export async function spawnViaConPty(
     let timer = setTimeout(timeoutFn, timeoutMs);
 
     term.onData((data) => {
+      if (settled) return;
       const clean = stripAnsi(data);
       if (clean) {
         clearTimeout(timer);
@@ -1369,6 +1403,8 @@ export async function spawnViaConPty(
       }
     });
     term.onExit(({ exitCode }) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       if (wroteOutput && !lastOutput.endsWith("\n")) {
         _stdout.write("\n");
@@ -1484,7 +1520,7 @@ export async function spawnHeadless(
       fn();
     };
     const timeoutError = () => {
-      try { child.kill(); } catch { /* already stopped */ }
+      killProcessTree(child.pid, () => child.kill());
       const error = new Error(
         `agy did not respond within ${timeoutMs / 1000}s.\n` +
         "Check authentication (run `agy` once interactively) and network connectivity.",
@@ -1507,7 +1543,7 @@ export async function spawnHeadless(
         try {
           streamParser.push(text);
         } catch (error) {
-          try { child.kill(); } catch { /* already stopped */ }
+          killProcessTree(child.pid, () => child.kill());
           finish(() => reject(error));
         }
       } else if (format === "text" && !suppressOutput) {

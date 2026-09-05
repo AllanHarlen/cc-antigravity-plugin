@@ -32,7 +32,7 @@ export function buildPolicyContext() {
     "  Both route through the bridge -> AGY -> Gemini, so file generation does not spend Claude tokens.",
     "- Large front-end work: pass --parallel to fan out independent components/screens.",
     "- Model guidance: omit --model unless the user requests one, preserving their AGY /model;",
-    "  generic Flash -> --model gemini-3.7-flash-high (runtime aliases track the newest catalog);",
+    "  generic Flash -> --model gemini-3.8-flash-high (runtime aliases track the newest catalog);",
     "  Claude review -> --model claude-sonnet-4-6; maximum Claude -> --model claude-opus-4-6-thinking.",
     "- Headless tasks use JSON and disable slash-command expansion by default. Use --format stream-json",
     "  for live tool/subagent progress, --effort only when explicitly requested, and --agent <name>",

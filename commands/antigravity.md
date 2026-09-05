@@ -31,7 +31,7 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 
 | Argument | Description | Example |
 |----------|-------------|---------|
-| `--model <name>` | Native AGY model slug or alias. The bridge discovers `agy models` with a 24-hour cache; omit it to preserve the user's AGY `/model`. | `--model gemini-3.7-flash-high` |
+| `--model <name>` | Native AGY model slug or alias. The bridge discovers `agy models` with a 24-hour cache; omit it to preserve the user's AGY `/model`. | `--model gemini-3.8-flash-high` |
 | `--format <format>` | Headless output: `text`, `json`, or `stream-json` (default: `json`). Stream progress is written to stderr and only the final result to stdout. | `--format stream-json` |
 | `--effort <level>` | Native reasoning effort: `low`, `medium`, or `high`. Only forwarded when explicitly requested. | `--effort high` |
 | `--mode <mode>` | Native permission mode: `plan` or `accept-edits`. | `--mode plan` |
@@ -75,7 +75,8 @@ also normalizes loose names defensively, but pass the canonical id whenever you 
 
 | User says (natural language) | Pass | Resolves to |
 |------------------------------|------|-------------|
-| "gemini 3.7 flash", "flash" | `--model gemini-3.7-flash-high` | Newest matching Flash member from `agy models` |
+| "flash" | `--model gemini-3.8-flash-high` | Newest matching Flash member from `agy models` |
+| "gemini 3.7 flash" | `--model gemini-3.7-flash-high` | Version pinned; newest tier within that family |
 | "gemini 3.7 flash medium" | `--model gemini-3.7-flash-medium` | Gemini 3.7 Flash (Medium), when available |
 | "claude opus", "opus" | `--model claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) |
 | "claude sonnet", "sonnet" | `--model claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) |
