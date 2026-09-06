@@ -175,14 +175,25 @@ Defaults:
 
 Exit codes:
    0  Success
-   1  Generic error
+   1  Generic error       — also EMPTY_RESPONSE well within the timeout window
   10  QUOTA_EXAUSTED  — quota or rate limit hit; workflow should retry or pause
   11  AUTH_REQUIRED   — AGY needs interactive sign-in (run \`agy\` once)
-  12  TIMEOUT         — AGY did not respond within the configured timeout
+  12  TIMEOUT         — AGY did not respond within the configured timeout,
+                        including EMPTY_RESPONSE close to the effective timeout
   13  AGY_MISSING     — Antigravity CLI not found on PATH
 
+  EMPTY_RESPONSE: with --output-file, an empty response and exit 0 from agy is
+  never treated as success — it is classified (bridge.classified in the log,
+  and a {"status":"EMPTY_RESPONSE",...} line on stdout) and exits 1 or 12
+  depending on how close to the effective timeout it happened. The 0-byte
+  file is never written.
+
 Logging:
-  Plugin events are always written to a JSONL log file.
+  Plugin events are always written to a JSONL log file. Every invocation logs
+  exactly one terminal \`bridge.exit\` event ({exitCode, durationMs, model,
+  conversationId, outputBytes, classified}), regardless of which code path
+  returned — a headless run used to end at \`bridge.agy.args.built\` with no
+  way to tell "finished with code 0" from "process was killed".
     Windows:     %LOCALAPPDATA%\\agy\\cc-plugin-logs\\plugin-YYYY-MM-DD.jsonl
     macOS/Linux: ~/.local/share/agy/cc-plugin-logs/plugin-YYYY-MM-DD.jsonl
   Override:      CC_ANTIGRAVITY_LOG_PATH=<path>
@@ -982,7 +993,13 @@ export function buildAntigravityArgs({
     if (jsonSchema) args.push("--json-schema", jsonSchema);
     if (disableSlashCommands) args.push("--disable-slash-commands");
     args.push("--print", prompt);
-    if (timeout) args.push("--print-timeout", timeout);
+    // Sempre explicito: sem isso, agy usa seu proprio default de 5 min quando
+    // `--timeout` nao e informado, silenciosamente mais curto que o
+    // CONPTY_TIMEOUT_MS de 10 min do bridge. Numa run real, 7 de 9 dispatches
+    // sem `--timeout` morreram aos ~5m05s gravando `bytes: 0` e exit de
+    // sucesso — nenhum `bridge.classified`/`bridge.error` no log, porque o
+    // bridge nunca soube que havia um timeout em jogo (Achado 7).
+    args.push("--print-timeout", timeout || `${CONPTY_TIMEOUT_MS}ms`);
   }
   return args;
 }
@@ -1633,7 +1650,16 @@ async function copyGeneratedImages(sinceMs, destDir, _stdout = process.stdout) {
   }
 }
 
-export async function main(argv = process.argv.slice(2), {
+// `mainImpl` is the real implementation; `main` (below) wraps it so every
+// return path — success, classification, EMPTY_RESPONSE, or the catch-all
+// error handler — logs a single terminal `bridge.exit` event with duration.
+// Achado 7/8: the JSONL log had no exit/duration record at all; a normal
+// headless run ended at `bridge.agy.args.built` (plus `bridge.output.file` if
+// `--output-file`), with no way to tell "finished with code 0" from "process
+// was killed". `_diag` is mutated in place at the few points where
+// model/conversationId/outputBytes/classified become known, regardless of
+// which return statement fires afterward.
+async function mainImpl(argv = process.argv.slice(2), {
   _spawn = spawn,
   _spawnSync = spawnSync,
   _loadNodePty = loadNodePty,
@@ -1642,6 +1668,7 @@ export async function main(argv = process.argv.slice(2), {
   _stdout = process.stdout,
   _stderr = process.stderr,
   _isTTY = Boolean(process.stdout.isTTY),
+  _diag = {},
 } = {}) {
   try {
     logEvent("bridge.start", {
@@ -1713,6 +1740,7 @@ export async function main(argv = process.argv.slice(2), {
     } else {
       logEvent("bridge.model.resolved", { model, source: modelSource });
     }
+    _diag.model = model ?? null;
     const imageOutputDir = parsed.outputDir ? path.resolve(parsed.outputDir) : process.cwd();
     // --parallel and image generation are mutually exclusive; ignore parallel for images.
     if (parsed.parallel && parsed.generateImagem) {
@@ -1878,10 +1906,12 @@ export async function main(argv = process.argv.slice(2), {
         const resolvedOutputFile = path.resolve(parsed.outputFile);
         await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
         await fsp.writeFile(resolvedOutputFile, output, "utf8");
+        _diag.outputBytes = output.length;
         _stdout.write(resolvedOutputFile + "\n");
       }
       const classification = classifyAgyOutput(output, { format: "text", exitCode });
       if (classification) {
+        _diag.classified = classification.type;
         emitStructuredSignal(classification.type, classification.reason, model, undefined, _stdout);
         return classification.exitCode;
       }
@@ -1933,6 +1963,8 @@ export async function main(argv = process.argv.slice(2), {
       throw parseError;
     }
     if (classification) {
+      _diag.classified = classification.type;
+      _diag.conversationId = result?.conversationId ?? null;
       emitStructuredSignal(classification.type, classification.reason, model, result, _stdout);
       logEvent("bridge.classified", {
         type: classification.type,
@@ -1945,10 +1977,41 @@ export async function main(argv = process.argv.slice(2), {
       return classification.exitCode;
     }
 
+    // Achado 7/8: uma resposta vazia com `--output-file` e exit de sucesso
+    // nao e sucesso — e um caminho que hoje grava um arquivo de 0 byte e sai
+    // com o mesmo codigo de um resultado real, sem `bridge.classified` nem
+    // `bridge.error`. Numa run real, 7 dispatches sem `--timeout` morreram
+    // assim aos ~5m05s (a correcao do Achado 7 acima reduz a incidencia, mas
+    // nao elimina: um `--print-timeout` explicito ainda pode expirar em
+    // silencio, e uma chamada `--read-only` pode devolver vazio rapido demais
+    // para ser timeout). `elapsedMs` perto do timeout efetivo classifica como
+    // TIMEOUT; muito mais rapido do que isso classifica como ERROR generico —
+    // as duas com o mesmo sinal estruturado, nunca silencio.
+    if (parsed.outputFile && response.trim() === "" && String(headless.exitCode) === "0") {
+      const effectiveTimeoutMs = timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs;
+      const elapsedMs = Date.now() - spawnStartMs;
+      const nearTimeout = elapsedMs >= effectiveTimeoutMs * 0.8;
+      const emptyExitCode = nearTimeout ? EXIT_TIMEOUT : EXIT_ERROR;
+      const reason = `agy produced an empty response after ${elapsedMs}ms (timeout ${effectiveTimeoutMs}ms)`;
+      _diag.classified = "EMPTY_RESPONSE";
+      _diag.conversationId = result?.conversationId ?? null;
+      emitStructuredSignal("EMPTY_RESPONSE", reason, model, result, _stdout);
+      logEvent("bridge.classified", {
+        type: "EMPTY_RESPONSE",
+        reason,
+        model,
+        conversationId: result?.conversationId,
+        exitCode: emptyExitCode,
+      });
+      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
+      return emptyExitCode;
+    }
+
     if (parsed.outputFile) {
       const resolvedOutputFile = path.resolve(parsed.outputFile);
       await fsp.mkdir(path.dirname(resolvedOutputFile), { recursive: true });
       await fsp.writeFile(resolvedOutputFile, response, "utf8");
+      _diag.outputBytes = response.length;
       logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: response.length });
       _stdout.write(resolvedOutputFile + "\n");
     } else if (parsed.format !== "text" && response) {
@@ -1959,6 +2022,7 @@ export async function main(argv = process.argv.slice(2), {
     if (result?.error && String(result.status).toUpperCase() !== "SUCCESS") {
       _stderr.write(result.error + (result.error.endsWith("\n") ? "" : "\n"));
     }
+    _diag.conversationId = result?.conversationId ?? null;
     if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
     if (result && String(result.status).toUpperCase() !== "SUCCESS") return EXIT_ERROR;
     return headless.exitCode;
@@ -1972,6 +2036,30 @@ export async function main(argv = process.argv.slice(2), {
     if (error?.code === "EAGYAUTHREQUIRED") return EXIT_AUTH_REQUIRED;
     return EXIT_ERROR;
   }
+}
+
+/**
+ * Achado 7/8: o log JSONL de uma run headless normal terminava em
+ * `bridge.agy.args.built` (mais `bridge.output.file` se `--output-file`),
+ * sem nenhum evento de saida — nao havia como distinguir "terminou com codigo
+ * 0" de "processo foi morto". `mainImpl` nunca lanca (todo erro interno vira
+ * um exit code dentro do proprio try/catch), entao envolve-lo aqui e
+ * suficiente para garantir exatamente um `bridge.exit` por invocacao,
+ * independente de qual `return` disparou.
+ */
+export async function main(argv = process.argv.slice(2), options = {}) {
+  const diag = {};
+  const startedAt = Date.now();
+  const exitCode = await mainImpl(argv, { ...options, _diag: diag });
+  logEvent("bridge.exit", {
+    exitCode,
+    durationMs: Date.now() - startedAt,
+    model: diag.model ?? null,
+    conversationId: diag.conversationId ?? null,
+    outputBytes: diag.outputBytes ?? null,
+    classified: diag.classified ?? null,
+  });
+  return exitCode;
 }
 
 const isMain =
