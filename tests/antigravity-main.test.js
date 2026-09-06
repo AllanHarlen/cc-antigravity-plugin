@@ -339,3 +339,81 @@ test("main headless silence timeout returns EXIT_TIMEOUT", async () => {
   assert.equal(exitCode, EXIT_TIMEOUT);
   assert.match(io.stderr, /did not respond/);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Achado 7/8: resposta vazia com exit de sucesso e evento terminal bridge.exit */
+/* -------------------------------------------------------------------------- */
+
+test("an empty response with --output-file and exit 0, resolved well within timeout, is EXIT_ERROR not silent success", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-empty-"));
+  const outputFile = path.join(tempDir, "result.txt");
+  // stream-json com so o evento "init" — sem "result" — deixa response vazia.
+  const ndjson = JSON.stringify({ event: "init", conversation_id: "conv-empty", init: {} }) + "\n";
+  const { exitCode, io } = await runMain(
+    ["--format", "stream-json", "--output-file", outputFile, "task"],
+    { spawnResult: { stdout: ndjson, exitCode: 0 }, _conPtyTimeoutMs: 10_000 },
+  );
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stdout, /"status":"EMPTY_RESPONSE"/);
+  assert.equal(await fs.readFile(outputFile, "utf8").catch(() => null), null, "empty-response is terminal, never writes the 0-byte file");
+});
+
+test("an empty response very close to the effective timeout is EXIT_TIMEOUT, not EXIT_ERROR", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-empty-timeout-"));
+  const outputFile = path.join(tempDir, "result.txt");
+  const ndjson = JSON.stringify({ event: "init", conversation_id: "conv-empty", init: {} }) + "\n";
+  // Timeout efetivo de 0ms: 0.8 * 0 = 0, e elapsedMs >= 0 e sempre verdadeiro —
+  // determinístico sem depender de relogio real. spawnHeadless ainda resolve
+  // via o "close" fake (microtask) antes do proprio setTimeout(0) de silencio
+  // disparar, entao o teste exercita a classificacao EMPTY_RESPONSE, nao o
+  // timeout real de spawnHeadless.
+  const { exitCode, io } = await runMain(
+    ["--format", "stream-json", "--output-file", outputFile, "task"],
+    { spawnResult: { stdout: ndjson, exitCode: 0 }, _conPtyTimeoutMs: 0 },
+  );
+  assert.equal(exitCode, EXIT_TIMEOUT);
+  assert.match(io.stdout, /"status":"EMPTY_RESPONSE"/);
+});
+
+test("main logs exactly one terminal bridge.exit event per invocation, with duration and exit code", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-bridge-exit-"));
+  const logPath = path.join(dir, "plugin-test.jsonl");
+  const previousEnv = process.env.CC_ANTIGRAVITY_LOG_PATH;
+  process.env.CC_ANTIGRAVITY_LOG_PATH = logPath;
+  try {
+    const { exitCode } = await runMain(["task"]);
+    assert.equal(exitCode, EXIT_SUCCESS);
+    const lines = (await fs.readFile(logPath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const exitEvents = lines.filter((l) => l.event === "bridge.exit");
+    assert.equal(exitEvents.length, 1, "exactly one bridge.exit per main() call");
+    assert.equal(exitEvents[0].exitCode, EXIT_SUCCESS);
+    assert.equal(typeof exitEvents[0].durationMs, "number");
+    assert.ok(exitEvents[0].durationMs >= 0);
+  } finally {
+    if (previousEnv === undefined) delete process.env.CC_ANTIGRAVITY_LOG_PATH;
+    else process.env.CC_ANTIGRAVITY_LOG_PATH = previousEnv;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("bridge.exit fires on the classification path too, with the classified type recorded", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-bridge-exit-classified-"));
+  const logPath = path.join(dir, "plugin-test.jsonl");
+  const previousEnv = process.env.CC_ANTIGRAVITY_LOG_PATH;
+  process.env.CC_ANTIGRAVITY_LOG_PATH = logPath;
+  try {
+    const { exitCode } = await runMain(["task"], {
+      spawnResult: { stdout: "", stderr: "429 too many requests", exitCode: 1 },
+    });
+    assert.equal(exitCode, EXIT_QUOTA_EXAUSTED);
+    const lines = (await fs.readFile(logPath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const exitEvents = lines.filter((l) => l.event === "bridge.exit");
+    assert.equal(exitEvents.length, 1);
+    assert.equal(exitEvents[0].exitCode, EXIT_QUOTA_EXAUSTED);
+    assert.equal(exitEvents[0].classified, "QUOTA_EXAUSTED");
+  } finally {
+    if (previousEnv === undefined) delete process.env.CC_ANTIGRAVITY_LOG_PATH;
+    else process.env.CC_ANTIGRAVITY_LOG_PATH = previousEnv;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

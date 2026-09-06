@@ -264,7 +264,19 @@ test("buildAntigravityArgs forwards model, format, effort, mode, agent, and sche
     "--json-schema", "schema.json",
     "--disable-slash-commands",
     "--print", "x",
+    "--print-timeout", "600000ms",
   ]);
+});
+
+test("buildAntigravityArgs always sends --print-timeout in headless mode, defaulting to CONPTY_TIMEOUT_MS when --timeout is absent", () => {
+  // Achado 7: sem isso, agy usa seu proprio default de 5 min quando --timeout
+  // nao e informado — 7 de 9 dispatches sem --timeout na run analisada
+  // morreram aos ~5m05s com bytes:0 e exit de sucesso.
+  const withoutTimeout = buildAntigravityArgs({ prompt: "x" });
+  assert.deepEqual(withoutTimeout.slice(-2), ["--print-timeout", "600000ms"]);
+
+  const withTimeout = buildAntigravityArgs({ prompt: "x", timeout: "10m" });
+  assert.deepEqual(withTimeout.slice(-2), ["--print-timeout", "10m"]);
 });
 
 test("buildAntigravityPrompt uses non-mutating constraints in read-only mode", () => {
