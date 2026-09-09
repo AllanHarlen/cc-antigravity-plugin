@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 
 import {
   buildAntigravityArgs,
+  appendRunJournal,
   buildAntigravityPrompt,
   buildImagePrompt,
   checkAgyConnectivity,
@@ -28,6 +29,17 @@ import {
   EXIT_QUOTA_EXAUSTED,
   EXIT_AUTH_REQUIRED,
 } from "../scripts/antigravity-bridge.js";
+
+test("appendRunJournal keeps an append-only recoverable execution record", async () => {
+  const journalPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "agy-runs-")), "runs.jsonl");
+  appendRunJournal({ runId: "run-recovery", status: "RUNNING", pid: 123 }, journalPath);
+  appendRunJournal({ runId: "run-recovery", status: "DONE", exitCode: 0 }, journalPath);
+  const records = (await fs.readFile(journalPath, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(records.map(({ runId, status }) => ({ runId, status })), [
+    { runId: "run-recovery", status: "RUNNING" },
+    { runId: "run-recovery", status: "DONE" },
+  ]);
+});
 
 test("parseTimeoutMs accepts a bare millisecond count", () => {
   assert.equal(parseTimeoutMs("5000"), 5000);

@@ -7,6 +7,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
+import { randomUUID } from "node:crypto";
 import { resolveDefaultLogPath, logEvent } from "./utils.js";
 
 const DEFAULT_MAX_FILES = 40;
@@ -85,6 +86,26 @@ export const EXIT_AUTH_REQUIRED = 11;
 export const EXIT_TIMEOUT = 12;
 export const EXIT_AGY_MISSING = 13;
 export const EXIT_ERROR = 1;
+
+// Um log de eventos de execucao e deliberadamente append-only: uma queda de
+// energia pode interromper a ultima linha, mas nunca invalida os eventos ja
+// confirmados. O orquestrador pode consultar o ultimo estado por runId e nao
+// confundir um PID antigo com um processo vivo.
+export function resolveRunJournalPath() {
+  const logPath = process.env.CC_ANTIGRAVITY_LOG_PATH || resolveDefaultLogPath();
+  return process.env.CC_ANTIGRAVITY_RUN_JOURNAL_PATH || path.join(path.dirname(logPath), "runs.jsonl");
+}
+
+export function appendRunJournal(entry, journalPath = resolveRunJournalPath()) {
+  const record = { timestamp: new Date().toISOString(), ...entry };
+  try {
+    fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+    fs.appendFileSync(journalPath, JSON.stringify(record) + "\n", "utf8");
+  } catch {
+    // Observabilidade nao pode tornar a execucao indisponivel.
+  }
+  return record;
+}
 
 // Patterns that identify rate-limit / quota responses in AGY output.
 const QUOTA_PATTERNS = [
@@ -1506,6 +1527,7 @@ export async function spawnHeadless(
     _stdout = process.stdout,
     _stderr = process.stderr,
     suppressOutput = false,
+    onStart = undefined,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -1517,6 +1539,7 @@ export async function spawnHeadless(
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });
+      onStart?.({ pid: child.pid ?? null });
     } catch (error) {
       reject(error);
       return;
@@ -1671,6 +1694,9 @@ async function mainImpl(argv = process.argv.slice(2), {
   _diag = {},
 } = {}) {
   try {
+    const runId = _diag.runId ?? randomUUID();
+    _diag.runId = runId;
+    appendRunJournal({ runId, status: "STARTING", pid: process.pid, cwd: process.cwd() });
     logEvent("bridge.start", {
       flags: argv.filter((a) => a.startsWith("--")),
       taskLength: argv.join(" ").length,
@@ -1928,6 +1954,13 @@ async function mainImpl(argv = process.argv.slice(2), {
         _stdout,
         _stderr,
         suppressOutput: Boolean(parsed.outputFile),
+        onStart: ({ pid }) => appendRunJournal({
+          runId: _diag.runId,
+          status: "RUNNING",
+          pid,
+          executor: "agy",
+          requestedConversationId: parsed.conversationId ?? null,
+        }),
       });
     } catch (error) {
       if (error?.code === "ENOENT" || String(error).includes("not found")) {
@@ -2048,7 +2081,7 @@ async function mainImpl(argv = process.argv.slice(2), {
  * independente de qual `return` disparou.
  */
 export async function main(argv = process.argv.slice(2), options = {}) {
-  const diag = {};
+  const diag = { runId: options.runId ?? randomUUID() };
   const startedAt = Date.now();
   const exitCode = await mainImpl(argv, { ...options, _diag: diag });
   logEvent("bridge.exit", {
@@ -2057,6 +2090,16 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     model: diag.model ?? null,
     conversationId: diag.conversationId ?? null,
     outputBytes: diag.outputBytes ?? null,
+    classified: diag.classified ?? null,
+  });
+  appendRunJournal({
+    runId: diag.runId,
+    status: exitCode === EXIT_SUCCESS ? "DONE" : exitCode === EXIT_TIMEOUT ? "STALLED" : "FAILED",
+    pid: process.pid,
+    exitCode,
+    durationMs: Date.now() - startedAt,
+    model: diag.model ?? null,
+    conversationId: diag.conversationId ?? null,
     classified: diag.classified ?? null,
   });
   return exitCode;
