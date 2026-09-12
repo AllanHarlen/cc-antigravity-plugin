@@ -33,7 +33,7 @@ Claude can call `agy` directly via Bash (`agy --print "task" --dangerously-skip-
 | Structured quota/auth signals | JSON envelope | Exit codes 10/11 + normalized JSON signal with conversation/usage |
 | Automatic file ingestion | Manual | `--dirs`, `--files` with binary detection and truncation |
 | Parallelism via Gemini subagents | Manual | `--parallel` + optional NDJSON progress (`--format stream-json`) |
-| Fallback for 28k char limit (Windows) | Silent breakage | Auto-drop of inline files |
+| Windows CLI limit bypass | Silent breakage | Stdin streaming (`--use-stdin`) / auto-fallback avoiding dropped files |
 | Auditable logging | No | JSONL in `%LOCALAPPDATA%\agy\cc-plugin-logs\` |
 | Process overhead | None | Node.js async child process; ConPTY only for `--interactive` |
 | Visibility of AGY actions | Full — direct output | Black box — Claude doesn't validate before exec |
@@ -204,7 +204,8 @@ $antigravity-integration <task>
 | `--conversation <id>` | Resume a specific AGY conversation by ID |
 | `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |
 | `--output-file <path>` | Write the parsed final response to a file instead of stdout |
-| `--task-file <path>` | Read task text from a file instead of argv. Protects the caller-to-bridge hop from OS command-line limits. Does **not** raise the 28,000-char bridge-to-agy budget below — that limit is on the final `agy --print <prompt>` call, which always goes through argv. Mutually exclusive with `--task`/positional task text. |
+| `--task-file <path>`, `--prompt-file <path>` | Read task text from a file instead of argv. Protects the caller-to-bridge hop from OS command-line limits. |
+| `--use-stdin`, `--stdin` | Stream prompt directly into AGY via stdin instead of `--print <prompt>`, bypassing Windows CLI limits and avoiding dropped context files. Automatically activated on Windows for prompts > 8.191 chars. |
 | `--dump-prompt <path>` | Write the exact prompt sent to AGY for this run to `<path>`, plus a JSON sidecar at `<path>.audit.json` with `{ promptChars, limit, degraded, droppedFiles, included, skipped }`. Reflects the real run (post prompt-overflow fallback), not a dry run. Prints `BRIDGE_CONTEXT_REPORT: <path>.audit.json` to stderr. |
 | `--interactive` | Use `--prompt-interactive` with PTY/ConPTY (requires TTY) |
 | `--sandbox` | Enable AGY sandbox mode |

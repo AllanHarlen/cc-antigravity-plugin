@@ -33,7 +33,7 @@ O Claude pode chamar `agy` diretamente via Bash (`agy --print "task" --dangerous
 | Sinais estruturados de quota/auth | Envelope JSON | Exit codes 10/11 + sinal JSON normalizado com conversa/uso |
 | Ingestão automática de arquivos | Manual | `--dirs`, `--files` com detecção binária e truncamento |
 | Parallelismo via subagentes Gemini | Manual | `--parallel` + progresso NDJSON opcional (`--format stream-json`) |
-| Fallback do limite de 28k chars (Windows) | Quebra silencioso | Drop automático de arquivos inline |
+| Bypass do limite de CLI (Windows) | Quebra silencioso | Streaming via stdin (`--use-stdin`) / fallback automático sem perda de arquivos |
 | Logging auditável | Não | JSONL em `%LOCALAPPDATA%\agy\cc-plugin-logs\` |
 | Overhead de processo | Nenhum | Child process assíncrono; ConPTY só em `--interactive` |
 | Visibilidade das ações do AGY | Total — output direto | Caixa preta — Claude não valida antes de executar |
@@ -204,7 +204,8 @@ $antigravity-integration <tarefa>
 | `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
 | `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
 | `--output-file <path>` | Grava a resposta final parseada em arquivo em vez de stdout |
-| `--task-file <path>` | Lê o texto da task de um arquivo em vez de argv. Protege o salto chamador→bridge do limite de linha de comando do SO. **Não** eleva o orçamento de 28.000 chars do salto bridge→agy abaixo — esse limite é da chamada final `agy --print <prompt>`, que sempre passa por argv. Mutuamente exclusivo com `--task`/texto posicional. |
+| `--task-file <path>`, `--prompt-file <path>` | Lê o texto da task de um arquivo em vez de argv. Protege o salto chamador→bridge do limite de linha de comando do SO. |
+| `--use-stdin`, `--stdin` | Faz stream do prompt diretamente para o AGY via stdin em vez de `--print <prompt>`, contornando limites de linha de comando no Windows e prevenindo perda de arquivos de contexto. Ativado automaticamente no Windows para prompts > 8.191 chars. |
 | `--dump-prompt <path>` | Grava o prompt exato enviado ao AGY nesta execução em `<path>`, mais um sidecar JSON em `<path>.audit.json` com `{ promptChars, limit, degraded, droppedFiles, included, skipped }`. Reflete a execução real (pós-fallback de overflow), não um dry run. Imprime `BRIDGE_CONTEXT_REPORT: <path>.audit.json` em stderr. |
 | `--interactive` | Usa `--prompt-interactive` com PTY/ConPTY (requer TTY) |
 | `--sandbox` | Ativa o modo sandbox do AGY |
