@@ -2,6 +2,13 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.3.0] - 2026-09-12 - Suporte a streaming de prompts via stdin e mitigação de overflow no Windows
+
+- `scripts/antigravity-bridge.js`: adicionadas as opções `--prompt-file` e `--use-stdin` / `--stdin`.
+- `scripts/antigravity-bridge.js` (`spawnHeadless`): quando `useStdin` ou prompt no Windows > 8.191 chars é detectado, omite o argumento `--print <prompt>` da linha de comando e faz o stream direto dos chunks do prompt via `child.stdin`.
+- Elimina completamente o descarte de arquivos e degradação de contexto (`prompt-overflow-windows`) no Windows, contornando com segurança o limite de argv do `CreateProcess`.
+- `tests/antigravity-bridge.test.js`: testes unitários adicionados para `--prompt-file`, `--use-stdin` e omissão de `--print`.
+
 ## [Unreleased] - Correcoes da revisao cruzada workflow/plugins (2026-09-04)
 
 Revisao que cruzou `WORKFLOW.md` com o codigo dos seis plugins encontrou uma serie de bugs de

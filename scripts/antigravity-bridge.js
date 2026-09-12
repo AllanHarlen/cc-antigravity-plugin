@@ -412,6 +412,8 @@ export function parseCliArgs(argv) {
     files: [],
     priorityFiles: [],
     taskFile: undefined,
+    promptFile: undefined,
+    useStdin: false,
     dumpPromptPath: undefined,
     format: "json",
     model: undefined,
@@ -465,6 +467,14 @@ export function parseCliArgs(argv) {
       case "--task-file":
         parsed.taskFile = takeOptionValue(argv, index, token);
         index += 1;
+        break;
+      case "--prompt-file":
+        parsed.promptFile = takeOptionValue(argv, index, token);
+        index += 1;
+        break;
+      case "--use-stdin":
+      case "--stdin":
+        parsed.useStdin = true;
         break;
       case "--dirs":
         parsed.dirs.push(...splitList(takeOptionValue(argv, index, token)));
@@ -611,6 +621,10 @@ export function parseCliArgs(argv) {
 
   if (!parsed.task) {
     parsed.task = taskTokens.join(" ").trim();
+  }
+
+  if (parsed.promptFile && !parsed.taskFile) {
+    parsed.taskFile = parsed.promptFile;
   }
 
   if (parsed.taskFile) {
@@ -994,6 +1008,7 @@ export function buildAntigravityArgs({
   addDirs = [],
   sandbox = false,
   skipPermissions = false,
+  useStdin = false,
 } = {}) {
   const args = [];
   if (continueConversation) args.push("--continue");
@@ -1013,7 +1028,9 @@ export function buildAntigravityArgs({
     args.push("--output-format", format);
     if (jsonSchema) args.push("--json-schema", jsonSchema);
     if (disableSlashCommands) args.push("--disable-slash-commands");
-    args.push("--print", prompt);
+    if (!useStdin && prompt !== undefined) {
+      args.push("--print", prompt);
+    }
     // Sempre explicito: sem isso, agy usa seu proprio default de 5 min quando
     // `--timeout` nao e informado, silenciosamente mais curto que o
     // CONPTY_TIMEOUT_MS de 10 min do bridge. Numa run real, 7 de 9 dispatches
@@ -1528,18 +1545,27 @@ export async function spawnHeadless(
     _stderr = process.stderr,
     suppressOutput = false,
     onStart = undefined,
+    prompt = undefined,
+    useStdin = false,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
     let child;
     try {
+      const stdio = (useStdin && prompt !== undefined)
+        ? ["pipe", "pipe", "pipe"]
+        : ["ignore", "pipe", "pipe"];
       child = _spawn(agyExe, agyArgs, {
         cwd: process.cwd(),
         env: process.env,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio,
       });
       onStart?.({ pid: child.pid ?? null });
+      if (useStdin && prompt !== undefined && child.stdin) {
+        child.stdin.write(prompt);
+        child.stdin.end();
+      }
     } catch (error) {
       reject(error);
       return;
@@ -1788,7 +1814,11 @@ async function mainImpl(argv = process.argv.slice(2), {
     let promptDegraded = false;
     let promptDroppedFiles = 0;
     let auditSkipped = context.skipped;
-    if (process.platform === "win32" && prompt.length > 28_000 && !parsed.generateImagem) {
+    const shouldStreamStdin = !parsed.interactive && (
+      parsed.useStdin ||
+      (!parsed.printCommand && process.platform === "win32" && prompt.length > 8191)
+    );
+    if (!shouldStreamStdin && process.platform === "win32" && prompt.length > 28_000 && !parsed.generateImagem) {
       const fallbackContext = {
         included: [],
         skipped: context.included.map((f) => ({ path: f.path, reason: "prompt-overflow-windows" })),
@@ -1880,6 +1910,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       addDirs: effectiveAddDirs,
       sandbox: parsed.sandbox,
       skipPermissions: parsed.skipPermissions,
+      useStdin: shouldStreamStdin,
     });
     logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout, readOnly: parsed.readOnly });
 
@@ -1954,6 +1985,8 @@ async function mainImpl(argv = process.argv.slice(2), {
         _stdout,
         _stderr,
         suppressOutput: Boolean(parsed.outputFile),
+        prompt,
+        useStdin: shouldStreamStdin,
         onStart: ({ pid }) => appendRunJournal({
           runId: _diag.runId,
           status: "RUNNING",

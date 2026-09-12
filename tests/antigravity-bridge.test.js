@@ -85,6 +85,8 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     files: ["**/*.json", "docs/**/*.md"],
     priorityFiles: [],
     taskFile: undefined,
+    promptFile: undefined,
+    useStdin: false,
     dumpPromptPath: undefined,
     format: "text",
     model: undefined,
@@ -1141,5 +1143,28 @@ test("buildImagePrompt includes context inventory when files are provided", () =
   });
   assert.match(prompt, /style\.json/);
   assert.match(prompt, /application\/json/);
+});
+
+test("parseCliArgs parses --prompt-file and sets taskFile", () => {
+  const parsed = parseCliArgs(["--prompt-file", "package.json"]);
+  assert.equal(parsed.promptFile, "package.json");
+  assert.equal(parsed.taskFile, "package.json");
+  assert.ok(parsed.task.includes("cc-antigravity-plugin"));
+});
+
+test("parseCliArgs parses --use-stdin flag", () => {
+  const parsed = parseCliArgs(["--use-stdin", "task text"]);
+  assert.equal(parsed.useStdin, true);
+  assert.equal(parsed.task, "task text");
+});
+
+test("buildAntigravityArgs with useStdin omits --print prompt argument", () => {
+  const args = buildAntigravityArgs({
+    prompt: "long prompt to stream via stdin",
+    useStdin: true,
+  });
+  assert.ok(!args.includes("--print"));
+  assert.ok(!args.includes("long prompt to stream via stdin"));
+  assert.ok(args.includes("--output-format"));
 });
 
