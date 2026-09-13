@@ -12,6 +12,25 @@ import { resolveDefaultLogPath, logEvent } from "./utils.js";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
+// Headless prompts above these sizes are streamed to agy over stdin instead of
+// `--print <prompt>`: agy reads the prompt from stdin when --print is omitted
+// (verified end-to-end on AGY 1.2.2 with a 97k-char prompt). cmd.exe caps a line
+// at 8,191 chars and CreateProcess breaks near ~29k after Node's quoting; Linux
+// caps a single argv entry at 131,072 bytes (MAX_ARG_STRLEN).
+const WIN_ARGV_SAFE_CHARS = 8_191;
+const POSIX_ARGV_SAFE_CHARS = 100_000;
+const ARGV_PROMPT_LIMIT = 28_000;
+// Open Design package files --design-system inlines in full, in priority order.
+export const DESIGN_SYSTEM_CORE_FILES = [
+  "design-contract.json",
+  "DESIGN.md",
+  "tokens.css",
+  "components.html",
+  "USAGE.md",
+  "components.manifest.json",
+  "assets/manifest.json",
+];
+const DESIGN_SYSTEM_MAX_FILE_BYTES = 262_144;
 const SUPPORTED_FORMATS = new Set(["text", "json", "stream-json"]);
 const SUPPORTED_EFFORTS = new Set(["low", "medium", "high"]);
 const SUPPORTED_MODES = new Set(["plan", "accept-edits"]);
@@ -135,11 +154,11 @@ const USAGE = `Usage:
 Options:
   --task <text>              Explicit task text.
   --task-file <path>         Read task text from a file instead of argv. Protects the
-                             caller-to-bridge hop from OS command-line limits. Does NOT
-                             raise the 28,000-char bridge-to-agy budget below (that limit
-                             is on the final \`agy --print <prompt>\` invocation, which
-                             always goes through argv). Mutually exclusive with --task
-                             and positional task text.
+                             caller-to-bridge hop from OS command-line limits. The
+                             bridge-to-agy hop streams large headless prompts over stdin,
+                             so it has no size budget either (see --use-stdin). Alias:
+                             --prompt-file. Mutually exclusive with --task and positional
+                             task text.
   --dirs <path,...>          Directories to ingest recursively.
   --add-dir <path>           Add a directory to AGY's native workspace. Repeatable.
                              Default: current working directory (added automatically).
@@ -147,6 +166,12 @@ Options:
   --priority-files <path,...> Relative paths to prioritize before the --max-files cutoff.
                              Without this, files are kept in plain alphabetical order, so
                              a large match set silently drops whichever paths sort last.
+  --design-system <dir,...>  Open Design package(s) to hand to AGY without truncation. Uses
+                             <dir>/resolved when present. Core files (design-contract.json,
+                             DESIGN.md, tokens.css, components.html, USAGE.md,
+                             components.manifest.json, assets/manifest.json) are inlined in
+                             full, ahead of and outside --max-files/--max-file-bytes; every
+                             other package file is listed for on-demand view_file reads.
   --format <format>          Headless output: text, json, or stream-json. Default: json.
   --model <name>             Model slug or natural-language alias. Resolved dynamically from \`agy models\`.
                              Omitted when not requested so AGY honors the user's own /model setting.
@@ -175,8 +200,13 @@ Options:
   --conversation <id>        Resume a specific AGY conversation.
   --sandbox                  Enable AGY sandbox mode.
   --skip-permissions         Explicitly forward --dangerously-skip-permissions (on by default).
-  --max-files <n>            Maximum files to inline. Default: 40.
-  --max-file-bytes <n>       Maximum bytes per file. Default: 32768.
+  --max-files <n>            Maximum --dirs/--files files to inline (--design-system core
+                             files are exempt). Default: 40.
+  --max-file-bytes <n>       Maximum bytes per --dirs/--files file. Default: 32768.
+  --use-stdin, --stdin       Force streaming the prompt to agy over stdin instead of
+                             --print <prompt>. Automatic for headless prompts above 8,191
+                             chars on Windows and 100,000 chars elsewhere. --interactive
+                             always passes the prompt in argv.
   --output-file <path>       Write the full AGY output to a file instead of streaming to
                              stdout. Only the resolved file path is printed to stdout.
                              Designed for callers that use the Read tool: pass this flag,
@@ -184,7 +214,8 @@ Options:
                              Immune to sandbox pipe limits and stdout buffering.
   --dump-prompt <path>       Write the exact prompt sent to AGY for this run to <path>,
                              plus a JSON sidecar at "<path>.audit.json" with
-                             { promptChars, limit, degraded, droppedFiles, included, skipped }.
+                             { promptChars, limit, transport, degraded, droppedFiles,
+                               included, skipped, designSystems }.
                              Reflects the real run (post prompt-overflow fallback), not a
                              dry run. Prints "BRIDGE_CONTEXT_REPORT: <path>" to stderr.
   --print-command            Print the resolved agy command and exit.
@@ -227,6 +258,8 @@ function summarizeParsedArgs(parsed) {
     addDirs: parsed.addDirs,
     files: parsed.files,
     priorityFiles: parsed.priorityFiles,
+    designSystems: parsed.designSystems,
+    useStdin: parsed.useStdin,
     taskFile: parsed.taskFile,
     dumpPromptPath: parsed.dumpPromptPath,
     format: parsed.format,
@@ -266,6 +299,7 @@ function summarizeContext(context) {
       truncated: file.truncated,
     })),
     skipped: context.skipped,
+    designSystems: context.designSystems ?? [],
   };
 }
 
@@ -411,6 +445,7 @@ export function parseCliArgs(argv) {
     addDirs: [],
     files: [],
     priorityFiles: [],
+    designSystems: [],
     taskFile: undefined,
     promptFile: undefined,
     useStdin: false,
@@ -490,6 +525,10 @@ export function parseCliArgs(argv) {
         break;
       case "--priority-files":
         parsed.priorityFiles.push(...splitList(takeOptionValue(argv, index, token)));
+        index += 1;
+        break;
+      case "--design-system":
+        parsed.designSystems.push(...splitList(takeOptionValue(argv, index, token)));
         index += 1;
         break;
       case "--dump-prompt":
@@ -842,6 +881,154 @@ export async function collectContextFiles({
   return { included, skipped };
 }
 
+function hasDesignSystemMarker(dir) {
+  return ["design-contract.json", "DESIGN.md", "tokens.css"].some((name) =>
+    fs.existsSync(path.join(dir, name)),
+  );
+}
+
+// Resolves --design-system packages into inline context. Unlike --dirs, a package's core
+// files are never cut by --max-files nor truncated by --max-file-bytes: a visual contract
+// that reaches the model half-read is worse than none. The rest of the package (previews,
+// kits, sources, assets) is only listed, so AGY can view_file what a decision needs.
+export async function collectDesignSystemContext({ cwd, designSystems = [] }) {
+  const packages = [];
+  const included = [];
+  const skipped = [];
+
+  for (const entry of designSystems) {
+    const requestedRoot = path.resolve(cwd, entry);
+    const resolvedRoot = path.join(requestedRoot, "resolved");
+    const packageRoot = hasDesignSystemMarker(resolvedRoot) ? resolvedRoot : requestedRoot;
+    if (!hasDesignSystemMarker(packageRoot)) {
+      throw new Error(
+        `--design-system "${entry}" is not an Open Design package: expected ` +
+          `design-contract.json, DESIGN.md or tokens.css in ${packageRoot}.`,
+      );
+    }
+
+    const coreFiles = [];
+    const handledPaths = new Set();
+    for (const name of DESIGN_SYSTEM_CORE_FILES) {
+      const absolutePath = path.join(packageRoot, name);
+      let buffer;
+      try {
+        if (!(await fsp.stat(absolutePath)).isFile()) continue;
+        buffer = await fsp.readFile(absolutePath);
+      } catch {
+        continue;
+      }
+      const relativePath = relativeToCwd(cwd, absolutePath);
+      handledPaths.add(relativePath);
+      if (isBinaryCandidate(absolutePath, buffer)) {
+        skipped.push({ path: relativePath, reason: "unsupported-extension" });
+        continue;
+      }
+      const truncated = buffer.length > DESIGN_SYSTEM_MAX_FILE_BYTES;
+      included.push({
+        path: relativePath,
+        mediaType: getMediaType(absolutePath),
+        bytes: buffer.length,
+        truncated,
+        content: (truncated ? buffer.subarray(0, DESIGN_SYSTEM_MAX_FILE_BYTES) : buffer).toString("utf8"),
+      });
+      coreFiles.push(relativePath);
+    }
+
+    const onDemand = walkDirSync(packageRoot)
+      .map((absolutePath) => relativeToCwd(cwd, absolutePath))
+      .filter((relativePath) => !handledPaths.has(relativePath))
+      .sort((left, right) => left.localeCompare(right));
+    for (const relativePath of onDemand) {
+      skipped.push({ path: relativePath, reason: "design-system-on-demand" });
+    }
+
+    const rootName = path.basename(packageRoot);
+    packages.push({
+      id: rootName === "resolved" ? path.basename(path.dirname(packageRoot)) : rootName,
+      root: relativeToCwd(cwd, packageRoot) || ".",
+      coreFiles,
+      onDemandCount: onDemand.length,
+    });
+  }
+
+  return { packages, included, skipped };
+}
+
+// Design files go first so they are the last ones an argv-budget fallback drops, and a
+// --dirs walk that also covers the package cannot re-add them truncated.
+export function mergeDesignSystemContext(designContext, generalContext) {
+  const corePaths = new Set(designContext.included.map((file) => file.path));
+  const generalIncluded = generalContext.included.filter((file) => !corePaths.has(file.path));
+  const generalIncludedPaths = new Set(generalIncluded.map((file) => file.path));
+  const designSkipped = designContext.skipped.filter((entry) => !generalIncludedPaths.has(entry.path));
+  const designSkippedPaths = new Set(designSkipped.map((entry) => entry.path));
+  const generalSkipped = generalContext.skipped.filter(
+    (entry) => !corePaths.has(entry.path) && !designSkippedPaths.has(entry.path),
+  );
+  return {
+    included: [...designContext.included, ...generalIncluded],
+    skipped: [...designSkipped, ...generalSkipped],
+    designSystems: designContext.packages,
+  };
+}
+
+export function resolvePromptTransport({
+  promptLength,
+  platform = process.platform,
+  interactive = false,
+  forceStdin = false,
+}) {
+  // `--prompt-interactive` under a PTY has no stdin channel for the prompt.
+  if (interactive) return "argv";
+  if (forceStdin) return "stdin";
+  const argvSafeChars = platform === "win32" ? WIN_ARGV_SAFE_CHARS : POSIX_ARGV_SAFE_CHARS;
+  return promptLength > argvSafeChars ? "stdin" : "argv";
+}
+
+// Drops inline files from the end of `included` (lowest priority first) one at a time
+// until the prompt fits, instead of discarding the whole context at once.
+export function fitContextToPromptBudget({
+  context,
+  buildPrompt,
+  limit,
+  reason = "prompt-overflow-windows",
+}) {
+  const included = [...context.included];
+  const dropped = [];
+  const snapshot = () => ({
+    ...context,
+    included: [...included],
+    skipped: [...context.skipped, ...dropped],
+  });
+  let current = snapshot();
+  let prompt = buildPrompt(current);
+  while (prompt.length > limit && included.length > 0) {
+    const file = included.pop();
+    dropped.unshift({ path: file.path, reason });
+    current = snapshot();
+    prompt = buildPrompt(current);
+  }
+  return { prompt, context: current, droppedFiles: dropped.length };
+}
+
+// Returns "" without packages so the default prompt stays byte-for-byte unchanged.
+export function buildDesignSystemBlock(packages = []) {
+  if (!packages || packages.length === 0) return "";
+  return packages
+    .map(
+      (pkg) => `
+
+<design_system id="${pkg.id}" root="${pkg.root}">
+- Authoritative visual package. Its core files are inlined in full in <context_files>: ${pkg.coreFiles.join(", ") || "none"}.
+- Build UI from its tokens (var(--*)) and the component patterns and states in components.html; do not invent colors, spacing, radii, shadows or font stacks.
+- ${pkg.onDemandCount} other package file(s) are listed in <context_inventory> as design-system-on-demand; read them with view_file only when a decision needs them.
+- "${pkg.id}" identifies where this package came from, not the product being built. Never put that name or its brand wordmarks into product UI text, page titles, metadata, alt text or code comments unless the task explicitly asks for it.
+</design_system>`,
+    )
+    .join("");
+}
+
 // Builds the optional <parallelism> block appended to the constraints when --parallel is set.
 // Returns "" when parallelism is disabled so the default prompt stays byte-for-byte unchanged.
 export function buildParallelismBlock({ parallel = false, subagentModel } = {}) {
@@ -921,7 +1108,7 @@ ${inventoryLines.join("\n")}
 
 <context_files>
 ${fileBlocks}
-</context_files>
+</context_files>${buildDesignSystemBlock(context.designSystems)}
 
 <task>
 ${task}
@@ -1563,6 +1750,9 @@ export async function spawnHeadless(
       });
       onStart?.({ pid: child.pid ?? null });
       if (useStdin && prompt !== undefined && child.stdin) {
+        // agy may exit before draining a large prompt (auth/quota failures). An
+        // unhandled EPIPE would crash the bridge before exit classification runs.
+        child.stdin.on?.("error", (error) => logEvent("bridge.stdin.error", { message: error.message }));
         child.stdin.write(prompt);
         child.stdin.end();
       }
@@ -1774,7 +1964,13 @@ async function mainImpl(argv = process.argv.slice(2), {
       ? [process.cwd()]
       : parsed.addDirs;
 
-    const context = await collectContextFiles({
+    // --design-system packages are inlined first and in full, outside the
+    // --max-files/--max-file-bytes budget that governs --dirs/--files.
+    const designContext = await collectDesignSystemContext({
+      cwd: process.cwd(),
+      designSystems: parsed.designSystems,
+    });
+    const generalContext = await collectContextFiles({
       cwd: process.cwd(),
       dirs: parsed.dirs,
       patterns: parsed.files,
@@ -1782,6 +1978,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       maxFileBytes: parsed.maxFileBytes,
       priorityPaths: parsed.priorityFiles,
     });
+    const context = mergeDesignSystemContext(designContext, generalContext);
     logEvent("bridge.context.collected", summarizeContext(context));
 
     // Resolve --model auto after context is collected so we know the actual size.
@@ -1798,62 +1995,67 @@ async function mainImpl(argv = process.argv.slice(2), {
     if (parsed.parallel && parsed.generateImagem) {
       logEvent("bridge.parallel.ignored", { reason: "generate-imagem" });
     }
-    let prompt = parsed.generateImagem
-      ? buildImagePrompt({ task: parsed.task, context, outputDir: imageOutputDir })
+    const buildPromptFor = (promptContext) => parsed.generateImagem
+      ? buildImagePrompt({ task: parsed.task, context: promptContext, outputDir: imageOutputDir })
       : buildAntigravityPrompt({
           task: parsed.task,
-          context,
+          context: promptContext,
           parallel: parsed.parallel,
           subagentModel,
           readOnly: parsed.readOnly,
         });
+    let prompt = buildPromptFor(context);
 
-    // Windows CreateProcess limit: ~32,767 chars total. Real prompts (with quotes,
-    // backslashes, XML) break at ~29,140 raw chars after Node.js arg encoding.
-    // When exceeded, drop inline file content and let AGY read via --add-dir tools.
+    // Transport. Headless runs stream any prompt above the platform's safe argv size
+    // over stdin, so inline context is never dropped for size — including under
+    // --print-command/--dump-prompt, which must reflect the real run. Only
+    // --interactive (`--prompt-interactive` under a PTY) still needs the prompt in argv;
+    // there the Windows CreateProcess limit (~32,767 chars, ~29k after Node's quoting)
+    // is met by dropping the lowest-priority inline files one at a time.
     let promptDegraded = false;
     let promptDroppedFiles = 0;
-    let auditSkipped = context.skipped;
-    const shouldStreamStdin = !parsed.interactive && (
-      parsed.useStdin ||
-      (!parsed.printCommand && process.platform === "win32" && prompt.length > 8191)
-    );
-    if (!shouldStreamStdin && process.platform === "win32" && prompt.length > 28_000 && !parsed.generateImagem) {
-      const fallbackContext = {
-        included: [],
-        skipped: context.included.map((f) => ({ path: f.path, reason: "prompt-overflow-windows" })),
-      };
-      promptDegraded = context.included.length > 0;
-      promptDroppedFiles = context.included.length;
-      auditSkipped = context.skipped.concat(fallbackContext.skipped);
-      logEvent("bridge.prompt.overflow", {
-        promptLength: prompt.length,
-        limit: 28_000,
-        droppedFiles: context.included.length,
+    let effectiveContext = context;
+    const transport = resolvePromptTransport({
+      promptLength: prompt.length,
+      interactive: parsed.interactive,
+      forceStdin: parsed.useStdin,
+    });
+    const shouldStreamStdin = transport === "stdin";
+    if (!shouldStreamStdin && process.platform === "win32" && prompt.length > ARGV_PROMPT_LIMIT && !parsed.generateImagem) {
+      const originalLength = prompt.length;
+      const fitted = fitContextToPromptBudget({
+        context,
+        buildPrompt: buildPromptFor,
+        limit: ARGV_PROMPT_LIMIT,
       });
-      if (context.included.length > 0) {
+      promptDroppedFiles = fitted.droppedFiles;
+      promptDegraded = fitted.droppedFiles > 0;
+      effectiveContext = fitted.context;
+      prompt = fitted.prompt;
+      logEvent("bridge.prompt.overflow", {
+        promptLength: originalLength,
+        limit: ARGV_PROMPT_LIMIT,
+        droppedFiles: fitted.droppedFiles,
+        transport,
+      });
+      if (promptDegraded) {
         _stderr.write(
-          `Warning: prompt (${prompt.length} chars) exceeds Windows CLI limit. ` +
-            `Dropped ${context.included.length} inline file(s); AGY will read them via --add-dir.\n`,
+          `Warning: prompt (${originalLength} chars) exceeds Windows CLI limit. ` +
+            `Dropped ${fitted.droppedFiles} inline file(s); AGY will read them via --add-dir. ` +
+            "Lowest-priority files went first; --interactive cannot stream over stdin, so run " +
+            "headless to send the full context.\n",
         );
       }
-      prompt = buildAntigravityPrompt({
-        task: parsed.task,
-        context: fallbackContext,
-        parallel: parsed.parallel,
-        subagentModel,
-        readOnly: parsed.readOnly,
-      });
 
       // Dropping inline files only helps when the files themselves pushed the prompt
       // over the limit. When the task text alone is still over budget, spawning would
       // fail with an opaque ENAMETOOLONG from the OS. Fail fast here instead, with an
-      // actionable message, matching the 28,000-char delegation budget cc-executor-subagents
-      // enforces on the caller side (skills/executor-subagents/scripts/check-agy-prompt.mjs).
-      if (prompt.length > 28_000) {
+      // actionable message.
+      if (prompt.length > ARGV_PROMPT_LIMIT) {
         const error = new Error(
           `Task text alone produces a ${prompt.length}-char prompt, which exceeds the ` +
-            "28,000-char Windows command-line budget even with no inline files attached. " +
+            "28,000-char Windows command-line budget even with no inline files attached " +
+            "(--interactive cannot stream over stdin; run headless instead). " +
             "Split the task into independent-deliverable subtasks and delegate them as " +
             "separate calls instead of one oversized prompt.",
         );
@@ -1868,13 +2070,13 @@ async function mainImpl(argv = process.argv.slice(2), {
       fs.writeFileSync(resolvedDumpPath, prompt, "utf8");
       const auditPayload = {
         promptChars: prompt.length,
-        limit: 28_000,
+        limit: ARGV_PROMPT_LIMIT,
+        transport,
         degraded: promptDegraded,
         droppedFiles: promptDroppedFiles,
-        included: promptDegraded
-          ? []
-          : context.included.map((f) => ({ path: f.path, bytes: f.bytes, truncated: f.truncated })),
-        skipped: auditSkipped,
+        included: effectiveContext.included.map((f) => ({ path: f.path, bytes: f.bytes, truncated: f.truncated })),
+        skipped: effectiveContext.skipped,
+        designSystems: context.designSystems ?? [],
       };
       fs.writeFileSync(auditPath, JSON.stringify(auditPayload, null, 2), "utf8");
       _stderr.write(`BRIDGE_CONTEXT_REPORT: ${auditPath}\n`);
@@ -1912,7 +2114,13 @@ async function mainImpl(argv = process.argv.slice(2), {
       skipPermissions: parsed.skipPermissions,
       useStdin: shouldStreamStdin,
     });
-    logEvent("bridge.agy.args.built", { args: summarizeAgyArgs(agyArgs), timeout, readOnly: parsed.readOnly });
+    logEvent("bridge.agy.args.built", {
+      args: summarizeAgyArgs(agyArgs),
+      timeout,
+      readOnly: parsed.readOnly,
+      transport,
+      promptChars: prompt.length,
+    });
 
     if (parsed.printCommand) {
       printResolvedCommands(agyArgs, _stdout);

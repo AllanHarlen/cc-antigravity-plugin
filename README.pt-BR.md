@@ -189,6 +189,7 @@ $antigravity-integration <tarefa>
 | `--dirs <path,...>` | Injeta diretórios recursivamente como contexto inline no prompt |
 | `--files <glob,...>` | Injeta arquivos que correspondem a globs separados por vírgula |
 | `--priority-files <path,...>` | Caminhos relativos a manter antes do corte de `--max-files`. Sem isso, os arquivos ficam em ordem alfabética pura, e um conjunto grande de matches descarta silenciosamente o que ordena por último. |
+| `--design-system <dir,...>` | Entrega um ou mais pacotes Open Design ao AGY sem truncar (usa `<dir>/resolved` quando existe). Os arquivos centrais — `design-contract.json`, `DESIGN.md`, `tokens.css`, `components.html`, `USAGE.md`, `components.manifest.json`, `assets/manifest.json` — vão na íntegra, antes e fora de `--max-files`/`--max-file-bytes`; os demais arquivos do pacote são listados para leitura sob demanda via `view_file`. Adiciona um bloco `<design_system>` que marca o pacote como autoritativo e mantém o nome dele fora dos textos do produto. |
 | `--add-dir <path>` | Adiciona diretório ao workspace nativo do AGY via `--add-dir`; repetível |
 | `--model <name>` | Slug nativo ou alias resolvido via `agy models`; omitido por padrão para preservar o `/model` do usuário |
 | `--format <format>` | `text`, `json` ou `stream-json`; JSON é o padrão headless |
@@ -205,11 +206,11 @@ $antigravity-integration <tarefa>
 | `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
 | `--output-file <path>` | Grava a resposta final parseada em arquivo em vez de stdout |
 | `--task-file <path>`, `--prompt-file <path>` | Lê o texto da task de um arquivo em vez de argv. Protege o salto chamador→bridge do limite de linha de comando do SO. |
-| `--use-stdin`, `--stdin` | Faz stream do prompt diretamente para o AGY via stdin em vez de `--print <prompt>`, contornando limites de linha de comando no Windows e prevenindo perda de arquivos de contexto. Ativado automaticamente no Windows para prompts > 8.191 chars. |
-| `--dump-prompt <path>` | Grava o prompt exato enviado ao AGY nesta execução em `<path>`, mais um sidecar JSON em `<path>.audit.json` com `{ promptChars, limit, degraded, droppedFiles, included, skipped }`. Reflete a execução real (pós-fallback de overflow), não um dry run. Imprime `BRIDGE_CONTEXT_REPORT: <path>.audit.json` em stderr. |
+| `--use-stdin`, `--stdin` | Força o envio do prompt ao AGY via stdin em vez de `--print <prompt>`. Automático para prompts headless acima de 8.191 chars no Windows e de 100.000 chars nas demais plataformas, então o contexto inline nunca é descartado por tamanho. `--interactive` sempre passa o prompt em argv; nesse caso, os arquivos inline de menor prioridade são descartados primeiro para caber no limite do Windows. |
+| `--dump-prompt <path>` | Grava o prompt exato enviado ao AGY nesta execução em `<path>`, mais um sidecar JSON em `<path>.audit.json` com `{ promptChars, limit, transport, degraded, droppedFiles, included, skipped, designSystems }`. Reflete a execução real (pós-fallback de overflow), não um dry run. Imprime `BRIDGE_CONTEXT_REPORT: <path>.audit.json` em stderr. |
 | `--interactive` | Usa `--prompt-interactive` com PTY/ConPTY (requer TTY) |
 | `--sandbox` | Ativa o modo sandbox do AGY |
-| `--max-files <n>` | Número máximo de arquivos injetados no contexto inline. Padrão: `40` |
+| `--max-files <n>` | Número máximo de arquivos de `--dirs`/`--files` injetados no contexto inline (arquivos centrais de `--design-system` ficam fora dessa conta). Padrão: `40` |
 | `--max-file-bytes <n>` | Número máximo de bytes por arquivo. Padrão: `32768` |
 | `--generate-image`, `--generate-imagem` | Gera imagem com a tool `generate_imagem` sem trocar o modelo |
 | `--output-dir <path>` | Diretório onde as imagens geradas são salvas. Padrão: diretório atual. |

@@ -2,6 +2,38 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.4.0] - 2026-09-13 - Contexto sem descarte: stdin em qualquer plataforma e `--design-system`
+
+Motivacao: numa run real do Orquestrador (12/09) o bridge 4.2.1 descartou os 40 arquivos do
+pacote de design (`max-files-exceeded` + `prompt-overflow-windows`, `included: []`) e o AGY so
+leu `tokens.css`/`components.html`/`DESIGN.md` quando decidiu por conta propria, e de forma
+irregular. A 4.3.0 ja fazia stream via stdin, mas nunca chegou a ser instalada: `plugin.json` e
+`marketplace.json` ficaram em 4.2.x.
+
+- Stdin validado ponta a ponta no AGY 1.2.2: prompt de 97.315 chars enviado sem `--print`, lido
+  ate a ultima linha (`input_tokens` 48.556), sem uso de ferramentas.
+- `resolvePromptTransport()`: todo prompt headless acima do tamanho seguro de argv vai por stdin —
+  8.191 chars no Windows, 100.000 nos demais (abaixo do `MAX_ARG_STRLEN` de 131.072 bytes do
+  Linux). `--print-command`/`--dump-prompt` passam a refletir o transporte real. So
+  `--interactive` continua em argv.
+- `fitContextToPromptBudget()`: no `--interactive` que estoura o limite do Windows, descarta os
+  arquivos de menor prioridade um por vez (antes descartava todos de uma vez).
+- `--design-system <dir,...>`: inclui na integra, antes e fora de `--max-files`/`--max-file-bytes`,
+  os arquivos centrais do pacote Open Design (`design-contract.json`, `DESIGN.md`, `tokens.css`,
+  `components.html`, `USAGE.md`, `components.manifest.json`, `assets/manifest.json`), usando
+  `<dir>/resolved` quando existe. Os demais arquivos do pacote entram no inventario como
+  `design-system-on-demand`; duplicatas vindas de `--dirs` sao removidas. Diretorio que nao e
+  pacote Open Design falha com erro explicito.
+- Bloco `<design_system>` no prompt: pacote autoritativo, sem inventar tokens, e o nome do pacote
+  tratado como proveniencia, nunca como marca do produto (na run, o nome do system foi parar no
+  header da aplicacao). Sem `--design-system`, o prompt fica byte a byte igual.
+- Sidecar do `--dump-prompt`: novos campos `transport` e `designSystems`; `included` passa a listar
+  o que realmente foi enviado mesmo quando ha descarte.
+- `spawnHeadless`: erro de escrita no stdin (agy encerrando cedo) vai para o log em vez de derrubar
+  o bridge antes da classificacao de saida.
+- Versao 4.4.0 alinhada em `package.json`, `.claude-plugin/plugin.json` e
+  `.claude-plugin/marketplace.json`.
+
 ## [4.3.0] - 2026-09-12 - Suporte a streaming de prompts via stdin e mitigação de overflow no Windows
 
 - `scripts/antigravity-bridge.js`: adicionadas as opções `--prompt-file` e `--use-stdin` / `--stdin`.
