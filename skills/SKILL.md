@@ -104,6 +104,7 @@ file ingestion, prompt assembly, structured error detection, and AGY invocation.
 |--------|----------|
 | `--dirs <path,...>` | Inline directories into the bridge prompt |
 | `--files <glob,...>` | Inline targeted globs and mixed data formats |
+| `--design-system <dir,...>` | Inline an Open Design package's core files in full (outside `--max-files`/`--max-file-bytes`) and list the rest for on-demand reads; prefer it over `--dirs` for design packages |
 | `--add-dir <path>` | Pass native AGY `--add-dir`; repeatable |
 | `--model <name>` | Native AGY slug or alias resolved against `agy models` with a 24-hour cache. Omit to preserve the user's AGY model; `auto` selects a tier from the newest Flash family. |
 | `--format <format>` | `text`, `json`, or `stream-json` (default `json`). Stream progress goes to stderr and only the final result to stdout. |

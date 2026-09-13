@@ -167,17 +167,57 @@ test("main --dump-prompt reports stderr pointer to the audit sidecar", async () 
   assert.ok(io.stderr.includes(`${dumpPath}.audit.json`));
 });
 
-test("main --dump-prompt marks context as degraded when the Windows prompt-overflow fallback drops files", async (t) => {
+function forceWin32(t) {
   const originalPlatform = process.platform;
   Object.defineProperty(process, "platform", { value: "win32" });
   t.after(() => Object.defineProperty(process, "platform", { value: originalPlatform }));
+}
 
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-dump-degraded-"));
-  const bigFile = path.join(tempDir, "big.txt");
-  await fs.writeFile(bigFile, "x".repeat(30_000));
+test("main --dump-prompt keeps oversized Windows headless context and reports stdin transport", async (t) => {
+  forceWin32(t);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-dump-stdin-"));
+  await fs.writeFile(path.join(tempDir, "big.txt"), "x".repeat(30_000));
   const dumpPath = path.join(tempDir, "prompt.txt");
 
-  const { exitCode } = await runMain([
+  const { exitCode, io } = await runMain([
+    "--print-command",
+    "--dump-prompt", dumpPath,
+    "--dirs", tempDir,
+    "analyze this",
+  ]);
+
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.doesNotMatch(io.stdout, /"--print"/, "the prompt must not travel in argv");
+  const audit = JSON.parse(await fs.readFile(`${dumpPath}.audit.json`, "utf8"));
+  assert.equal(audit.transport, "stdin");
+  assert.equal(audit.degraded, false);
+  assert.equal(audit.droppedFiles, 0);
+  assert.equal(audit.included.length, 1);
+  assert.ok(!audit.skipped.some((entry) => entry.reason === "prompt-overflow-windows"));
+});
+
+test("main pipes an oversized Windows headless prompt into agy stdin", async (t) => {
+  forceWin32(t);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-stdin-spawn-"));
+  await fs.writeFile(path.join(tempDir, "big.txt"), "x".repeat(30_000));
+  const asyncCalls = [];
+
+  const { exitCode } = await runMain(["--dirs", tempDir, "analyze this"], { asyncCalls });
+
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(asyncCalls[0].options.stdio[0], "pipe");
+  assert.ok(!asyncCalls[0].args.includes("--print"));
+});
+
+test("main --interactive on Windows drops only the lowest-priority inline files to fit argv", async (t) => {
+  forceWin32(t);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-interactive-fit-"));
+  await fs.writeFile(path.join(tempDir, "a.txt"), "a".repeat(15_000));
+  await fs.writeFile(path.join(tempDir, "z.txt"), "z".repeat(15_000));
+  const dumpPath = path.join(tempDir, "prompt.txt");
+
+  const { exitCode, io } = await runMain([
+    "--interactive",
     "--print-command",
     "--dump-prompt", dumpPath,
     "--dirs", tempDir,
@@ -186,13 +226,42 @@ test("main --dump-prompt marks context as degraded when the Windows prompt-overf
 
   assert.equal(exitCode, EXIT_SUCCESS);
   const audit = JSON.parse(await fs.readFile(`${dumpPath}.audit.json`, "utf8"));
+  assert.equal(audit.transport, "argv");
   assert.equal(audit.degraded, true);
   assert.equal(audit.droppedFiles, 1);
-  assert.deepEqual(audit.included, []);
+  assert.deepEqual(audit.included.map((f) => path.basename(f.path)), ["a.txt"]);
   assert.ok(
-    audit.skipped.some((entry) => entry.reason === "prompt-overflow-windows"),
-    "dropped file must be recorded with the overflow reason",
+    audit.skipped.some((entry) => path.basename(entry.path) === "z.txt" && entry.reason === "prompt-overflow-windows"),
+    "only the lowest-priority file is dropped, with the overflow reason",
   );
+  assert.match(io.stderr, /Dropped 1 inline file/);
+});
+
+test("main --design-system inlines the package core in full and describes it in the prompt", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-main-ds-"));
+  const pkg = path.join(tempDir, "acme");
+  await fs.mkdir(path.join(pkg, "preview"), { recursive: true });
+  await fs.writeFile(path.join(pkg, "tokens.css"), `:root{--accent:#123456;}\n/*${"x".repeat(40_000)}*/\n`);
+  await fs.writeFile(path.join(pkg, "DESIGN.md"), "# Acme\n");
+  await fs.writeFile(path.join(pkg, "preview", "colors.html"), "<p>c</p>\n");
+  const dumpPath = path.join(tempDir, "prompt.txt");
+
+  const { exitCode } = await runMain([
+    "--print-command",
+    "--dump-prompt", dumpPath,
+    "--design-system", pkg,
+    "build the home page",
+  ]);
+
+  assert.equal(exitCode, EXIT_SUCCESS);
+  const prompt = await fs.readFile(dumpPath, "utf8");
+  const audit = JSON.parse(await fs.readFile(`${dumpPath}.audit.json`, "utf8"));
+  assert.equal(audit.designSystems[0].id, "acme");
+  assert.equal(audit.designSystems[0].onDemandCount, 1);
+  assert.equal(audit.included.length, 2);
+  assert.ok(audit.included.every((f) => f.truncated === false));
+  assert.match(prompt, /<design_system id="acme"/);
+  assert.match(prompt, /--accent:#123456/);
 });
 
 test("main --read-only emits --mode plan and never skip-permissions", async () => {

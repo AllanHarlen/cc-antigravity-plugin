@@ -13,7 +13,11 @@ import {
   checkAgyConnectivity,
   classifyAgyOutput,
   collectContextFiles,
+  collectDesignSystemContext,
   createAgyStreamParser,
+  fitContextToPromptBudget,
+  mergeDesignSystemContext,
+  resolvePromptTransport,
   FALLBACK_MODEL_CATALOG,
   isKnownModel,
   parseAgyJsonResult,
@@ -84,6 +88,7 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     addDirs: [],
     files: ["**/*.json", "docs/**/*.md"],
     priorityFiles: [],
+    designSystems: [],
     taskFile: undefined,
     promptFile: undefined,
     useStdin: false,
@@ -1166,5 +1171,154 @@ test("buildAntigravityArgs with useStdin omits --print prompt argument", () => {
   assert.ok(!args.includes("--print"));
   assert.ok(!args.includes("long prompt to stream via stdin"));
   assert.ok(args.includes("--output-format"));
+});
+
+// ─── --design-system / prompt transport ──────────────────────────────────────
+
+async function makeDesignPackage(root, { tokensBytes = 40_000 } = {}) {
+  await fs.mkdir(path.join(root, "preview"), { recursive: true });
+  await fs.mkdir(path.join(root, "system"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "tokens.css"),
+    `:root{--accent:#1c69d4;}\n/*${"x".repeat(tokensBytes)}*/\n/* END-OF-TOKENS */\n`,
+  );
+  await fs.writeFile(path.join(root, "DESIGN.md"), "# Design\n");
+  await fs.writeFile(path.join(root, "components.html"), "<button class=\"btn\">ok</button>\n");
+  await fs.writeFile(path.join(root, "preview", "colors.html"), "<p>colors</p>\n");
+  await fs.writeFile(path.join(root, "system", "kit.html"), "<p>kit</p>\n");
+}
+
+test("parseCliArgs collects --design-system entries", () => {
+  const parsed = parseCliArgs([
+    "--design-system", "packages/ui/design-systems/bmw,ds/acme",
+    "--design-system", "ds/other",
+    "task",
+  ]);
+  assert.deepEqual(parsed.designSystems, ["packages/ui/design-systems/bmw", "ds/acme", "ds/other"]);
+});
+
+test("collectDesignSystemContext inlines core files in full and lists the rest on demand", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "agy-ds-"));
+  await makeDesignPackage(path.join(cwd, "packages", "ui", "design-systems", "acme"));
+
+  const context = await collectDesignSystemContext({
+    cwd,
+    designSystems: ["packages/ui/design-systems/acme"],
+  });
+
+  const root = "packages/ui/design-systems/acme";
+  assert.deepEqual(context.included.map((f) => f.path), [
+    `${root}/DESIGN.md`,
+    `${root}/tokens.css`,
+    `${root}/components.html`,
+  ]);
+  const tokens = context.included.find((f) => f.path.endsWith("tokens.css"));
+  assert.equal(tokens.truncated, false, "core files must bypass --max-file-bytes");
+  assert.match(tokens.content, /END-OF-TOKENS/);
+  assert.deepEqual(context.skipped, [
+    { path: `${root}/preview/colors.html`, reason: "design-system-on-demand" },
+    { path: `${root}/system/kit.html`, reason: "design-system-on-demand" },
+  ]);
+  assert.deepEqual(context.packages, [{
+    id: "acme",
+    root,
+    coreFiles: context.included.map((f) => f.path),
+    onDemandCount: 2,
+  }]);
+});
+
+test("collectDesignSystemContext prefers the resolved/ package and names it after its parent", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "agy-ds-resolved-"));
+  await makeDesignPackage(path.join(cwd, "bmw"), { tokensBytes: 10 });
+  await fs.mkdir(path.join(cwd, "bmw", "resolved"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "bmw", "resolved", "design-contract.json"), "{}\n");
+
+  const context = await collectDesignSystemContext({ cwd, designSystems: ["bmw"] });
+
+  assert.equal(context.packages[0].id, "bmw");
+  assert.equal(context.packages[0].root, "bmw/resolved");
+  assert.deepEqual(context.included.map((f) => f.path), ["bmw/resolved/design-contract.json"]);
+});
+
+test("collectDesignSystemContext rejects a directory that is not an Open Design package", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "agy-ds-invalid-"));
+  await fs.mkdir(path.join(cwd, "src"));
+  await assert.rejects(
+    () => collectDesignSystemContext({ cwd, designSystems: ["src"] }),
+    /not an Open Design package/,
+  );
+});
+
+test("mergeDesignSystemContext puts design files first and removes duplicates from --dirs", () => {
+  const design = {
+    packages: [{ id: "acme", root: "ds", coreFiles: ["ds/tokens.css"], onDemandCount: 1 }],
+    included: [{ path: "ds/tokens.css", mediaType: "text/plain", bytes: 1, truncated: false, content: "a" }],
+    skipped: [{ path: "ds/preview/colors.html", reason: "design-system-on-demand" }],
+  };
+  const general = {
+    included: [
+      { path: "ds/tokens.css", mediaType: "text/plain", bytes: 1, truncated: true, content: "a" },
+      { path: "src/app.tsx", mediaType: "text/plain", bytes: 1, truncated: false, content: "b" },
+    ],
+    skipped: [{ path: "ds/preview/colors.html", reason: "max-files-exceeded" }],
+  };
+
+  const merged = mergeDesignSystemContext(design, general);
+
+  assert.deepEqual(merged.included.map((f) => f.path), ["ds/tokens.css", "src/app.tsx"]);
+  assert.equal(merged.included[0].truncated, false);
+  assert.deepEqual(merged.skipped, [{ path: "ds/preview/colors.html", reason: "design-system-on-demand" }]);
+  assert.equal(merged.designSystems, design.packages);
+});
+
+test("resolvePromptTransport streams large headless prompts over stdin on every platform", () => {
+  assert.equal(resolvePromptTransport({ promptLength: 8_000, platform: "win32" }), "argv");
+  assert.equal(resolvePromptTransport({ promptLength: 8_192, platform: "win32" }), "stdin");
+  assert.equal(resolvePromptTransport({ promptLength: 90_000, platform: "linux" }), "argv");
+  assert.equal(resolvePromptTransport({ promptLength: 100_001, platform: "linux" }), "stdin");
+  assert.equal(resolvePromptTransport({ promptLength: 10, platform: "linux", forceStdin: true }), "stdin");
+  assert.equal(
+    resolvePromptTransport({ promptLength: 500_000, platform: "win32", interactive: true, forceStdin: true }),
+    "argv",
+    "--interactive has no stdin channel for the prompt",
+  );
+});
+
+test("fitContextToPromptBudget drops the lowest-priority files first, one at a time", () => {
+  const file = (name, size) => ({
+    path: name, mediaType: "text/plain", bytes: size, truncated: false, content: "x".repeat(size),
+  });
+  const context = { included: [file("ds/tokens.css", 10), file("a.txt", 50), file("z.txt", 50)], skipped: [] };
+  const buildPrompt = (ctx) => ctx.included.map((f) => f.content).join("");
+
+  const fitted = fitContextToPromptBudget({ context, buildPrompt, limit: 70 });
+
+  assert.equal(fitted.droppedFiles, 1);
+  assert.deepEqual(fitted.context.included.map((f) => f.path), ["ds/tokens.css", "a.txt"]);
+  assert.deepEqual(fitted.context.skipped, [{ path: "z.txt", reason: "prompt-overflow-windows" }]);
+  assert.equal(fitted.prompt.length, 60);
+});
+
+test("buildAntigravityPrompt adds the design_system block only when packages are present", () => {
+  const base = { task: "build the page", context: { included: [], skipped: [] } };
+  assert.doesNotMatch(buildAntigravityPrompt(base), /<design_system/);
+
+  const prompt = buildAntigravityPrompt({
+    ...base,
+    context: {
+      included: [],
+      skipped: [],
+      designSystems: [{
+        id: "bmw",
+        root: "packages/ui/design-systems/bmw",
+        coreFiles: ["packages/ui/design-systems/bmw/tokens.css"],
+        onDemandCount: 3,
+      }],
+    },
+  });
+
+  assert.match(prompt, /<design_system id="bmw" root="packages\/ui\/design-systems\/bmw">/);
+  assert.match(prompt, /not the product being built/);
+  assert.ok(prompt.indexOf("<design_system") < prompt.indexOf("<task>"));
 });
 

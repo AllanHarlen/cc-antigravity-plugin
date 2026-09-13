@@ -1,7 +1,7 @@
 ---
 description: Invoke the Antigravity (AGY) bridge directly as the canonical agentic coding path; creates, edits, and searches files using AGY's native tools
 allowed-tools: Bash(node *antigravity-bridge.js*), Glob, Read
-argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high] [--mode plan|accept-edits] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--read-only] [--interactive] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high] [--mode plan|accept-edits] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--design-system dir,...] [--read-only] [--interactive] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
@@ -44,6 +44,7 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 | `--dirs <paths>` | Recursively inline directories into the bridge prompt | `--dirs src,docs` |
 | `--add-dir <path>` | Add a directory to AGY's native workspace. Repeatable | `--add-dir src` |
 | `--files <pattern,...>` | Inline matching files into the bridge prompt | `--files "schemas/**/*.json"` |
+| `--design-system <dir,...>` | Inline an Open Design package's core files in full (outside `--max-files`/`--max-file-bytes`) and list the rest for on-demand reads | `--design-system packages/ui/design-systems/bmw` |
 | `--read-only` | Force native `--mode plan`, disable skip-permissions/workspace auto-add, and keep slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. | `--read-only` |
 | `--continue`, `-c` | Continue the most recent AGY conversation | `--continue` |
 | `--conversation <id>` | Resume a specific AGY conversation | `--conversation abc123` |
