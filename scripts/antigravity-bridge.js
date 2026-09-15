@@ -7,7 +7,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolveDefaultLogPath, logEvent } from "./utils.js";
 
 const DEFAULT_MAX_FILES = 40;
@@ -193,6 +193,8 @@ Options:
   --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
+                             With --generate-image, accepted as a compatibility hint and
+                             normalized to supervised headless stream-json mode.
   --agent <name>             Select an AGY custom agent. Use --interactive for a PTY session.
   --read-only                Imply --mode plan, disable --dangerously-skip-permissions, and
                              disable workspace auto-add.
@@ -1124,7 +1126,7 @@ ${completionConstraint}
 </constraints>${buildParallelismBlock({ parallel, subagentModel })}`;
 }
 
-export function buildImagePrompt({ task, context, outputDir }) {
+export function buildImagePrompt({ task, context }) {
   const inventoryLines = [];
 
   if (context.included.length > 0) {
@@ -1169,10 +1171,12 @@ ${task}
 </task>
 
 <constraints>
-- You are an image generation assistant. Generate the image described in the task using the generate_imagem tool.
-- Use generate_imagem with the exact description from the task above as the prompt.
-- After generating, save the image file using write_to_file to the directory: ${outputDir ?? process.cwd()}
-  Use the exact filename produced by generate_imagem (keep the original extension).
+- You are an image generation assistant. Call the generate_image tool exactly once.
+- Pass the exact description from the task above as the image prompt and request its stated aspect ratio.
+- Do not call grep_search, view_file, list_dir, run_command, write_to_file, or any other tool.
+- Do not inspect the workspace and do not try to copy the generated file. The caller observes and copies the
+  image from this conversation's private output directory.
+- As soon as generate_image returns, reply only IMAGE_GENERATION_COMPLETE and stop immediately.
 - If inline context files are provided, use them to inform the visual style or content of the image.
 - If you hit a quota or rate limit, immediately output on its own line and then stop:
   QUOTA_EXAUSTED reason="<specific reason>" model="<model name>"
@@ -1560,16 +1564,44 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
 // node, git, test runners), which are orphaned on timeout. `taskkill /T /F`
 // kills the whole process tree; on POSIX we fall back to the direct kill,
 // since the child was not spawned in its own process group.
-function killProcessTree(pid, fallbackKill) {
-  if (!pid) return;
-  if (process.platform === "win32") {
-    const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
+export function killProcessTree(
+  pid,
+  fallbackKill,
+  { _spawnSync = spawnSync, platform = process.platform } = {},
+) {
+  if (!pid) {
+    try {
+      fallbackKill();
+      return { ok: true, method: "direct", pid: null };
+    } catch (error) {
+      return {
+        ok: false,
+        method: "direct",
+        pid: null,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  if (platform === "win32") {
+    const result = _spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
       stdio: "ignore",
       shell: false,
     });
-    if (result.status === 0) return;
+    if (result.status === 0) {
+      return { ok: true, method: "taskkill", pid, status: result.status };
+    }
   }
-  try { fallbackKill(); } catch { /* already stopped */ }
+  try {
+    fallbackKill();
+    return { ok: true, method: "direct", pid };
+  } catch (error) {
+    return {
+      ok: false,
+      method: "direct",
+      pid,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 // PTY merges stdout and stderr into a single stream by design; agy error output
@@ -1683,7 +1715,7 @@ function renderStreamProgress(event) {
   return null;
 }
 
-export function createAgyStreamParser({ onProgress = () => {} } = {}) {
+export function createAgyStreamParser({ onProgress = () => {}, onEvent = () => {} } = {}) {
   let buffer = "";
   let finalResult;
 
@@ -1698,6 +1730,7 @@ export function createAgyStreamParser({ onProgress = () => {} } = {}) {
         `AGY returned invalid stream-json event: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    onEvent(event);
     if (event.event === "result" && event.result) {
       finalResult = parseAgyJsonResult(event.result);
       return;
@@ -1833,6 +1866,194 @@ export async function spawnHeadless(
   });
 }
 
+/**
+ * Image mode has a different completion condition from ordinary headless
+ * prompts: a validated image in this run's conversation directory is final.
+ * AGY 1.2.3 can remain RUNNING after generate_image, so this supervisor uses a
+ * total deadline, observes stream-json for the conversation id, and terminates
+ * the complete child tree as soon as the file is stable.
+ */
+export async function spawnImageHeadless(
+  agyExe,
+  agyArgs,
+  {
+    timeoutMs = CONPTY_TIMEOUT_MS,
+    sinceMs = Date.now(),
+    brainBase = path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".gemini", "antigravity-cli", "brain"),
+    requestedConversationId = undefined,
+    baseline = new Set(),
+    _spawn = spawn,
+    _stdout = process.stdout,
+    _stderr = process.stderr,
+    onStart = undefined,
+    prompt = undefined,
+    useStdin = false,
+    _waitForGeneratedImage = waitForGeneratedImage,
+    _killProcessTree = killProcessTree,
+    pollIntervalMs = 250,
+    stableChecks = 2,
+    stableForMs = 750,
+    postExitGraceMs = 1_500,
+    invalidGraceMs = 1_500,
+    terminationWaitMs = 3_000,
+  } = {},
+) {
+  const state = { closed: false, closedAt: null, exitCode: null };
+  let conversationId = requestedConversationId;
+  let finalResult;
+  let parseError = null;
+  let child;
+  let closeResolve;
+  let fatalReject;
+  const closePromise = new Promise((resolve) => { closeResolve = resolve; });
+  const fatalPromise = new Promise((_, reject) => { fatalReject = reject; });
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const parser = createAgyStreamParser({
+    // Routine stream-json progress is operational telemetry, not stderr. On
+    // Windows PowerShell 5, native stderr becomes a terminating
+    // NativeCommandError under ErrorActionPreference=Stop even with 2>&1.
+    onProgress: (line) => logEvent("bridge.image.progress", { line }),
+    onEvent: (event) => {
+      const observed = event.conversation_id ??
+        event.init?.conversation_id ??
+        event.step_update?.conversation_id ??
+        event.result?.conversation_id;
+      if (observed && !conversationId) {
+        conversationId = observed;
+        logEvent("bridge.image.session.bound", { conversationId });
+      } else if (observed && conversationId !== observed) {
+        const error = new Error(
+          `AGY stream changed conversation id from ${conversationId} to ${observed}; refusing ambiguous image ownership`,
+        );
+        error.code = "EAGYIMAGESESSION";
+        fatalReject(error);
+      }
+    },
+  });
+
+  try {
+    const stdio = (useStdin && prompt !== undefined)
+      ? ["pipe", "pipe", "pipe"]
+      : ["ignore", "pipe", "pipe"];
+    child = _spawn(agyExe, agyArgs, {
+      cwd: process.cwd(),
+      env: process.env,
+      shell: false,
+      stdio,
+    });
+    onStart?.({ pid: child.pid ?? null });
+    if (useStdin && prompt !== undefined && child.stdin) {
+      child.stdin.on?.("error", (error) => logEvent("bridge.stdin.error", { message: error.message }));
+      child.stdin.write(prompt);
+      child.stdin.end();
+    }
+  } catch (error) {
+    throw error;
+  }
+
+  child.stdout?.on("data", (chunk) => {
+    const text = chunk.toString("utf8");
+    stdoutChunks.push(text);
+    if (shouldLogAgyOutput()) logEvent("agy.output.chunk", { text });
+    try {
+      parser.push(text);
+    } catch (error) {
+      // Preserve raw output so authentication/quota text can still be
+      // classified after an invalid/missing stream-json envelope.
+      parseError = error;
+    }
+  });
+  child.stderr?.on("data", (chunk) => {
+    const text = chunk.toString("utf8");
+    stderrChunks.push(text);
+    _stderr.write(text);
+  });
+  child.on("error", (error) => {
+    state.closed = true;
+    state.closedAt = Date.now();
+    fatalReject(error);
+    closeResolve();
+  });
+  child.on("close", (exitCode) => {
+    state.closed = true;
+    state.closedAt = Date.now();
+    state.exitCode = exitCode ?? EXIT_ERROR;
+    if (!parseError) {
+      try {
+        finalResult = parser.end();
+      } catch (error) {
+        parseError = error;
+      }
+    }
+    closeResolve();
+  });
+
+  let image;
+  try {
+    image = await Promise.race([
+      _waitForGeneratedImage({
+        brainBase,
+        sinceMs,
+        timeoutMs,
+        getConversationId: () => conversationId,
+        getProcessState: () => state,
+        baseline,
+        pollIntervalMs,
+        stableChecks,
+        stableForMs,
+        postExitGraceMs,
+        invalidGraceMs,
+      }),
+      fatalPromise,
+    ]);
+  } catch (error) {
+    if (error?.code === "EAGYIMAGEMISSING" && state.closed) {
+      return {
+        exitCode: state.exitCode ?? EXIT_ERROR,
+        stdout: stdoutChunks.join(""),
+        stderr: stderrChunks.join(""),
+        result: finalResult,
+        parseError,
+        conversationId,
+        sourcePath: null,
+        imageError: error,
+        termination: { ok: true, method: "already-exited", pid: child.pid ?? null },
+      };
+    }
+    if (!state.closed) {
+      const termination = await Promise.resolve(_killProcessTree(child.pid, () => child.kill()));
+      logEvent("bridge.image.process_tree.terminated", {
+        reason: error?.code ?? "error",
+        conversationId: conversationId ?? null,
+        ...termination,
+      });
+    }
+    throw error;
+  }
+
+  let termination = { ok: true, method: "already-exited", pid: child.pid ?? null };
+  if (!state.closed) {
+    termination = await Promise.resolve(_killProcessTree(child.pid, () => child.kill()));
+    await Promise.race([closePromise, delay(terminationWaitMs)]);
+  }
+  logEvent("bridge.image.process_tree.terminated", {
+    reason: "image-materialized",
+    conversationId: image.conversationId,
+    closeObserved: state.closed,
+    ...termination,
+  });
+  return {
+    exitCode: EXIT_SUCCESS,
+    stdout: stdoutChunks.join(""),
+    stderr: stderrChunks.join(""),
+    result: finalResult,
+    conversationId: image.conversationId,
+    sourcePath: image.sourcePath,
+    termination,
+  };
+}
+
 function renderAgyCommand(args) {
   const rendered = ["agy", ...args.map((arg) => JSON.stringify(arg))].join(" ");
   return rendered;
@@ -1842,7 +2063,9 @@ function printResolvedCommands(agyArgs, _stdout = process.stdout) {
   _stdout.write(renderAgyCommand(agyArgs) + "\n");
 }
 
-async function findFilesNewerThan(dir, sinceMs, extensions) {
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+
+async function findSessionImages(dir, sinceMs, baseline = new Set()) {
   const results = [];
   let entries;
   try {
@@ -1852,41 +2075,266 @@ async function findFilesNewerThan(dir, sinceMs, extensions) {
   }
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...(await findFilesNewerThan(fullPath, sinceMs, extensions)));
-    } else if (entry.isFile() && extensions.has(path.extname(entry.name).toLowerCase())) {
+    // generate_image writes the requested asset at the conversation root. Do
+    // not recurse into .system_generated: it contains logs and may contain
+    // unrelated preview/screenshot files.
+    if (entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
       try {
         const stat = await fsp.stat(fullPath);
-        if (stat.mtimeMs >= sinceMs) results.push(fullPath);
+        const identity = `${fullPath}\0${stat.size}\0${stat.mtimeMs}`;
+        if (stat.mtimeMs >= sinceMs - 1_000 && !baseline.has(identity)) {
+          results.push({ path: fullPath, size: stat.size, mtimeMs: stat.mtimeMs });
+        }
       } catch { /* skip */ }
     }
   }
   return results;
 }
 
-async function copyGeneratedImages(sinceMs, destDir, _stdout = process.stdout) {
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
-  const brainBase = path.join(home, ".gemini", "antigravity-cli", "brain");
-  const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
-  let images;
-  try {
-    images = await findFilesNewerThan(brainBase, sinceMs, imageExtensions);
-  } catch {
-    return;
-  }
-  if (images.length > 0) {
-    await fsp.mkdir(destDir, { recursive: true });
-  }
-  for (const src of images) {
-    const dest = path.join(destDir, path.basename(src));
-    try {
-      await fsp.copyFile(src, dest);
-      _stdout.write(`\nImage saved: ${path.basename(dest)}\n`);
-      logEvent("bridge.image.copied", { src, dest });
-    } catch (err) {
-      logEvent("bridge.image.copy.error", { src, dest, message: err instanceof Error ? err.message : String(err) });
+export async function snapshotSessionImages(sessionDir) {
+  const entries = await findSessionImages(sessionDir, 0);
+  return new Set(entries.map((entry) => `${entry.path}\0${entry.size}\0${entry.mtimeMs}`));
+}
+
+function invalidImage(message) {
+  const error = new Error(message);
+  error.code = "EAGYIMAGEINVALID";
+  return error;
+}
+
+/** Read dimensions from encoded bytes so an extension alone cannot make
+ * arbitrary output pass as a generated image. */
+export function inspectGeneratedImage(bytes, extension = "") {
+  let mime;
+  let width;
+  let height;
+  if (bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    mime = "image/png";
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  } else if (bytes.length >= 10 && ["GIF87a", "GIF89a"].includes(bytes.toString("ascii", 0, 6))) {
+    mime = "image/gif";
+    width = bytes.readUInt16LE(6);
+    height = bytes.readUInt16LE(8);
+  } else if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
+    mime = "image/webp";
+    const chunk = bytes.toString("ascii", 12, 16);
+    if (chunk === "VP8X" && bytes.length >= 30) {
+      width = 1 + bytes.readUIntLE(24, 3);
+      height = 1 + bytes.readUIntLE(27, 3);
+    } else if (chunk === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
+      width = 1 + bytes[21] + ((bytes[22] & 0x3f) << 8);
+      height = 1 + (bytes[22] >> 6) + (bytes[23] << 2) + ((bytes[24] & 0x0f) << 10);
+    } else if (chunk === "VP8 " && bytes.length >= 30 && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+      width = bytes.readUInt16LE(26) & 0x3fff;
+      height = bytes.readUInt16LE(28) & 0x3fff;
+    }
+  } else if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    mime = "image/jpeg";
+    let offset = 2;
+    const sofMarkers = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+    while (offset + 8 < bytes.length) {
+      if (bytes[offset] !== 0xff) { offset += 1; continue; }
+      while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+      const marker = bytes[offset++];
+      if (marker === 0xd9 || marker === 0xda) break;
+      if (offset + 2 > bytes.length) break;
+      const segmentLength = bytes.readUInt16BE(offset);
+      if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+      if (sofMarkers.has(marker) && segmentLength >= 7) {
+        height = bytes.readUInt16BE(offset + 3);
+        width = bytes.readUInt16BE(offset + 5);
+        break;
+      }
+      offset += segmentLength;
     }
   }
+
+  if (!mime || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw invalidImage("AGY output is not a valid supported image or has no readable dimensions");
+  }
+  const complete =
+    (mime === "image/png" && bytes.length >= 36 && bytes.toString("ascii", bytes.length - 8, bytes.length - 4) === "IEND") ||
+    (mime === "image/jpeg" && bytes.at(-2) === 0xff && bytes.at(-1) === 0xd9) ||
+    (mime === "image/gif" && bytes.at(-1) === 0x3b) ||
+    (mime === "image/webp" && bytes.length >= 12 && bytes.readUInt32LE(4) + 8 === bytes.length);
+  if (!complete) {
+    throw invalidImage(`AGY output has an incomplete ${mime} file signature`);
+  }
+  const normalizedExtension = extension.toLowerCase();
+  const expectedExtensions = mime === "image/jpeg" ? new Set([".jpg", ".jpeg"]) : new Set([`.${mime.split("/")[1]}`]);
+  if (normalizedExtension && !expectedExtensions.has(normalizedExtension)) {
+    throw invalidImage(`AGY image content (${mime}) does not match its extension (${normalizedExtension})`);
+  }
+  return { mime, width, height, aspectRatio: Number((width / height).toFixed(6)) };
+}
+
+export function parseExpectedAspectRatio(task) {
+  const match = String(task ?? "").match(/(?:aspect(?:\s+ratio)?|propor(?:cao|ção))?\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)/i);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? width / height : null;
+}
+
+function imageCountError(count) {
+  const error = new Error(`AGY image result is ambiguous: expected exactly 1 new image, found ${count}`);
+  error.code = "EAGYIMAGEAMBIGUOUS";
+  return error;
+}
+
+function imageMissingError(conversationId) {
+  const suffix = conversationId ? ` in conversation ${conversationId}` : "";
+  const error = new Error(`AGY ended without materializing a generated image${suffix}`);
+  error.code = "EAGYIMAGEMISSING";
+  return error;
+}
+
+function imageTimeoutError(timeoutMs) {
+  const error = new Error(`agy did not generate an image within ${timeoutMs / 1000}s.`);
+  error.code = "ETIMEDOUT";
+  return error;
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Poll only the brain directory named by the stream-json conversation id.
+ * Requiring two identical observations prevents a partially-written file from
+ * being copied, and the post-exit grace covers the small close/fs visibility
+ * race without ever searching another conversation.
+ */
+export async function waitForGeneratedImage({
+  brainBase,
+  sinceMs,
+  timeoutMs,
+  getConversationId,
+  getProcessState = () => ({ closed: false, closedAt: null }),
+  baseline = new Set(),
+  pollIntervalMs = 250,
+  stableChecks = 2,
+  stableForMs = 750,
+  postExitGraceMs = 1_500,
+  invalidGraceMs = 1_500,
+}) {
+  const deadline = sinceMs + timeoutMs;
+  let previousSignature = null;
+  let stableCount = 0;
+  let stableSince = null;
+  let invalidSince = null;
+  let lastInvalidError = null;
+
+  while (true) {
+    const now = Date.now();
+    const conversationId = getConversationId();
+    const state = getProcessState();
+    if (conversationId) {
+      const sessionDir = path.join(brainBase, conversationId);
+      const candidates = await findSessionImages(sessionDir, sinceMs, baseline);
+      if (candidates.length > 1) throw imageCountError(candidates.length);
+      if (candidates.length === 1) {
+        const candidate = candidates[0];
+        const signature = `${candidate.path}\0${candidate.size}\0${candidate.mtimeMs}`;
+        if (signature === previousSignature) {
+          stableCount += 1;
+        } else {
+          stableCount = 1;
+          stableSince = now;
+          invalidSince = null;
+          lastInvalidError = null;
+        }
+        previousSignature = signature;
+        if (stableCount >= stableChecks && now - (stableSince ?? now) >= stableForMs) {
+          try {
+            const bytes = await fsp.readFile(candidate.path);
+            const metadata = inspectGeneratedImage(bytes, path.extname(candidate.path));
+            return { sourcePath: candidate.path, conversationId, metadata };
+          } catch (error) {
+            lastInvalidError = error;
+            invalidSince ??= now;
+            if (state.closed || now - invalidSince >= invalidGraceMs) throw error;
+          }
+        }
+      } else {
+        previousSignature = null;
+        stableCount = 0;
+        stableSince = null;
+      }
+    }
+
+    if (state.closed && now - (state.closedAt ?? now) >= postExitGraceMs) {
+      if (lastInvalidError) throw lastInvalidError;
+      throw imageMissingError(conversationId);
+    }
+    if (now >= deadline) throw imageTimeoutError(timeoutMs);
+    await delay(Math.min(pollIntervalMs, Math.max(1, deadline - now)));
+  }
+}
+
+/**
+ * Resolve exactly one image created by this one-image AGY invocation and copy
+ * it without overwriting an existing asset.  The structured receipt is both
+ * testable and suitable for downstream provenance/manifests.
+ */
+export async function copyGeneratedImages(sinceMs, destDir, _stdout = process.stdout, {
+  brainBase = path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".gemini", "antigravity-cli", "brain"),
+  sourcePath = undefined,
+  expectedAspectRatio = null,
+  aspectTolerance = 0.03,
+  runId = randomUUID(),
+} = {}) {
+  const images = sourcePath
+    ? [{ path: sourcePath }]
+    : await findSessionImages(brainBase, sinceMs);
+  if (images.length === 0) {
+    throw imageMissingError();
+  }
+  if (images.length !== 1) throw imageCountError(images.length);
+  const src = images[0].path;
+  await fsp.mkdir(destDir, { recursive: true });
+  const sourceBefore = await fsp.stat(src);
+  const sourceBytes = await fsp.readFile(src);
+  const sourceAfter = await fsp.stat(src);
+  if (sourceBefore.size !== sourceAfter.size || sourceBefore.mtimeMs !== sourceAfter.mtimeMs) {
+    const error = new Error(`AGY image changed while it was being copied: ${src}`);
+    error.code = "EAGYIMAGEUNSTABLE";
+    throw error;
+  }
+  const sourceMetadata = inspectGeneratedImage(sourceBytes, path.extname(src));
+  if (expectedAspectRatio && Math.abs(sourceMetadata.aspectRatio - expectedAspectRatio) / expectedAspectRatio > aspectTolerance) {
+    const error = new Error(`AGY image aspect ratio ${sourceMetadata.aspectRatio} does not match expected ${expectedAspectRatio}`);
+    error.code = "EAGYIMAGEASPECT";
+    throw error;
+  }
+  const destinationExtension = sourceMetadata.mime === "image/jpeg" ? ".jpg" : `.${sourceMetadata.mime.split("/")[1]}`;
+  const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, "-");
+  const dest = path.join(destDir, `imagem-gerada.${safeRunId}${destinationExtension}`);
+  const staged = path.join(destDir, `.imagem-gerada.${safeRunId}${destinationExtension}.part`);
+  try {
+    await fsp.copyFile(src, staged, fs.constants.COPYFILE_EXCL);
+    const stagedBytes = await fsp.readFile(staged);
+    inspectGeneratedImage(stagedBytes, destinationExtension);
+    await fsp.rename(staged, dest);
+  } finally {
+    try {
+      await fsp.rm(staged, { force: true });
+    } catch {
+      // A failed cleanup must not hide the original copy error.
+    }
+  }
+  // The receipt is deliberately derived from the final destination, not from
+  // the source or the staging file.
+  const copiedBytes = await fsp.readFile(dest);
+  const metadata = inspectGeneratedImage(copiedBytes, path.extname(dest));
+  const sha256 = createHash("sha256").update(copiedBytes).digest("hex");
+  const receipt = {
+    schemaVersion: 1,
+    count: 1,
+    images: [{ destination: dest, bytes: copiedBytes.length, sha256, ...metadata }],
+  };
+  _stdout.write(`AGY_IMAGE_RESULT: ${JSON.stringify(receipt)}\n`);
+  logEvent("bridge.image.result", receipt);
+  return receipt;
 }
 
 // `mainImpl` is the real implementation; `main` (below) wraps it so every
@@ -1903,6 +2351,10 @@ async function mainImpl(argv = process.argv.slice(2), {
   _spawnSync = spawnSync,
   _loadNodePty = loadNodePty,
   _resolveModelCatalog = resolveModelCatalog,
+  _copyGeneratedImages = copyGeneratedImages,
+  _spawnImageHeadless = spawnImageHeadless,
+  _snapshotSessionImages = snapshotSessionImages,
+  _brainBase = path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".gemini", "antigravity-cli", "brain"),
   _conPtyTimeoutMs = CONPTY_TIMEOUT_MS,
   _stdout = process.stdout,
   _stderr = process.stderr,
@@ -1960,7 +2412,7 @@ async function mainImpl(argv = process.argv.slice(2), {
 
     // In agentic mode, automatically add cwd to the AGY workspace when the caller
     // did not specify any --add-dir. This gives AGY access to the project by default.
-    const effectiveAddDirs = (!parsed.readOnly && parsed.addDirs.length === 0)
+    const effectiveAddDirs = (!parsed.readOnly && !parsed.generateImagem && parsed.addDirs.length === 0)
       ? [process.cwd()]
       : parsed.addDirs;
 
@@ -1996,7 +2448,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       logEvent("bridge.parallel.ignored", { reason: "generate-imagem" });
     }
     const buildPromptFor = (promptContext) => parsed.generateImagem
-      ? buildImagePrompt({ task: parsed.task, context: promptContext, outputDir: imageOutputDir })
+      ? buildImagePrompt({ task: parsed.task, context: promptContext })
       : buildAntigravityPrompt({
           task: parsed.task,
           context: promptContext,
@@ -2015,9 +2467,13 @@ async function mainImpl(argv = process.argv.slice(2), {
     let promptDegraded = false;
     let promptDroppedFiles = 0;
     let effectiveContext = context;
+    const imageHeadless = parsed.generateImagem;
+    if (parsed.generateImagem && parsed.interactive) {
+      logEvent("bridge.image.interactive.normalized", { mode: "headless-stream-json" });
+    }
     const transport = resolvePromptTransport({
       promptLength: prompt.length,
-      interactive: parsed.interactive,
+      interactive: parsed.interactive && !imageHeadless,
       forceStdin: parsed.useStdin,
     });
     const shouldStreamStdin = transport === "stdin";
@@ -2096,17 +2552,18 @@ async function mainImpl(argv = process.argv.slice(2), {
       );
       configuredEffort = undefined;
     }
+    const agyFormat = parsed.generateImagem ? "stream-json" : parsed.format;
     const agyArgs = buildAntigravityArgs({
       prompt,
       model,
-      format: parsed.format,
+      format: agyFormat,
       effort: parsed.effort ?? configuredEffort,
       mode: parsed.mode,
       agent: parsed.agent,
       jsonSchema: parsed.jsonSchema,
       disableSlashCommands: parsed.disableSlashCommands,
       timeout,
-      interactive: parsed.interactive,
+      interactive: parsed.interactive && !imageHeadless,
       continueConversation: parsed.continueConversation,
       conversationId: parsed.conversationId,
       addDirs: effectiveAddDirs,
@@ -2133,7 +2590,7 @@ async function mainImpl(argv = process.argv.slice(2), {
 
     const spawnStartMs = Date.now();
 
-    if (parsed.interactive) {
+    if (parsed.interactive && !imageHeadless) {
       const ptyModule = _loadNodePty();
       if (!ptyModule) {
         throw new Error(
@@ -2180,8 +2637,70 @@ async function mainImpl(argv = process.argv.slice(2), {
         emitStructuredSignal(classification.type, classification.reason, model, undefined, _stdout);
         return classification.exitCode;
       }
-      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
       return exitCode;
+    }
+
+    if (parsed.generateImagem) {
+      const requestedSessionDir = parsed.conversationId
+        ? path.join(_brainBase, parsed.conversationId)
+        : null;
+      const baseline = requestedSessionDir
+        ? await _snapshotSessionImages(requestedSessionDir)
+        : new Set();
+      let imageRun;
+      try {
+        imageRun = await _spawnImageHeadless(agyExe, agyArgs, {
+          timeoutMs: timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
+          sinceMs: spawnStartMs,
+          brainBase: _brainBase,
+          requestedConversationId: parsed.conversationId,
+          baseline,
+          _spawn,
+          _stdout,
+          _stderr,
+          prompt,
+          useStdin: shouldStreamStdin,
+          onStart: ({ pid }) => appendRunJournal({
+            runId: _diag.runId,
+            status: "RUNNING",
+            pid,
+            executor: "agy",
+            requestedConversationId: parsed.conversationId ?? null,
+          }),
+        });
+      } catch (error) {
+        if (error?.code === "ENOENT" || String(error).includes("not found")) {
+          throw buildAgyMissingError();
+        }
+        throw error;
+      }
+
+      const classification = classifyAgyOutput(
+        imageRun.result ?? `${imageRun.stdout}\n${imageRun.stderr}`,
+        { format: imageRun.result ? "stream-json" : "text", exitCode: imageRun.exitCode },
+      );
+      if (classification) {
+        _diag.classified = classification.type;
+        _diag.conversationId = imageRun.conversationId ?? imageRun.result?.conversationId ?? null;
+        emitStructuredSignal(classification.type, classification.reason, model, imageRun.result, _stdout);
+        logEvent("bridge.classified", {
+          type: classification.type,
+          reason: classification.reason,
+          model,
+          conversationId: _diag.conversationId,
+          exitCode: classification.exitCode,
+        });
+        return classification.exitCode;
+      }
+      if (!imageRun.sourcePath) throw imageRun.imageError ?? imageMissingError(imageRun.conversationId);
+      _diag.conversationId = imageRun.conversationId ?? null;
+      _diag.imageTermination = imageRun.termination;
+      _diag.imageReceipt = await _copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout, {
+        sourcePath: imageRun.sourcePath,
+        expectedAspectRatio: parseExpectedAspectRatio(parsed.task),
+        runId: _diag.runId,
+      });
+      return EXIT_SUCCESS;
     }
 
     let headless;
@@ -2247,7 +2766,6 @@ async function mainImpl(argv = process.argv.slice(2), {
         conversationId: result?.conversationId,
         exitCode: classification.exitCode,
       });
-      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
       return classification.exitCode;
     }
 
@@ -2277,7 +2795,6 @@ async function mainImpl(argv = process.argv.slice(2), {
         conversationId: result?.conversationId,
         exitCode: emptyExitCode,
       });
-      if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
       return emptyExitCode;
     }
 
@@ -2297,8 +2814,8 @@ async function mainImpl(argv = process.argv.slice(2), {
       _stderr.write(result.error + (result.error.endsWith("\n") ? "" : "\n"));
     }
     _diag.conversationId = result?.conversationId ?? null;
-    if (parsed.generateImagem) await copyGeneratedImages(spawnStartMs, imageOutputDir, _stdout);
     if (result && String(result.status).toUpperCase() !== "SUCCESS") return EXIT_ERROR;
+    if (headless.exitCode !== EXIT_SUCCESS) return headless.exitCode;
     return headless.exitCode;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2332,6 +2849,9 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     conversationId: diag.conversationId ?? null,
     outputBytes: diag.outputBytes ?? null,
     classified: diag.classified ?? null,
+    imageCount: diag.imageReceipt?.count ?? null,
+    imageDestination: diag.imageReceipt?.images?.[0]?.destination ?? null,
+    imageTermination: diag.imageTermination ?? null,
   });
   appendRunJournal({
     runId: diag.runId,
@@ -2342,6 +2862,8 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     model: diag.model ?? null,
     conversationId: diag.conversationId ?? null,
     classified: diag.classified ?? null,
+    imageCount: diag.imageReceipt?.count ?? null,
+    imageDestination: diag.imageReceipt?.images?.[0]?.destination ?? null,
   });
   return exitCode;
 }

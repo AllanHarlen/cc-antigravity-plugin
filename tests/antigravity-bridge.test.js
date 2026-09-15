@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 import {
   buildAntigravityArgs,
@@ -14,8 +16,11 @@ import {
   classifyAgyOutput,
   collectContextFiles,
   collectDesignSystemContext,
+  copyGeneratedImages,
   createAgyStreamParser,
   fitContextToPromptBudget,
+  inspectGeneratedImage,
+  killProcessTree,
   mergeDesignSystemContext,
   resolvePromptTransport,
   FALLBACK_MODEL_CATALOG,
@@ -23,16 +28,373 @@ import {
   parseAgyJsonResult,
   parseAgyModelsOutput,
   parseCliArgs,
+  parseExpectedAspectRatio,
   parseTimeoutMs,
   resolveAgyExe,
   resolveAutoModel,
   resolveModelCatalog,
   resolveModelAlias,
+  spawnImageHeadless,
   spawnViaConPty,
   stripAnsi,
+  waitForGeneratedImage,
   EXIT_QUOTA_EXAUSTED,
   EXIT_AUTH_REQUIRED,
 } from "../scripts/antigravity-bridge.js";
+
+function pngBytes(width = 1600, height = 900) {
+  const png = Buffer.alloc(36);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  png.write("IEND", 28, "ascii");
+  return png;
+}
+
+test("copyGeneratedImages emits the exact receipt from the copied destination", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-result-"));
+  const brain = path.join(root, "brain");
+  const dest = path.join(root, "dest");
+  await fs.mkdir(brain, { recursive: true });
+  const source = path.join(brain, "hero.png");
+  await fs.writeFile(source, pngBytes());
+  const output = [];
+  const receipt = await copyGeneratedImages(0, dest, { write: (value) => output.push(String(value)) }, {
+    sourcePath: source,
+    runId: "receipt-test",
+  });
+  assert.deepEqual(Object.keys(receipt), ["schemaVersion", "count", "images"]);
+  assert.deepEqual(Object.keys(receipt.images[0]), [
+    "destination", "bytes", "sha256", "mime", "width", "height", "aspectRatio",
+  ]);
+  assert.deepEqual(
+    { ...receipt.images[0], destination: path.basename(receipt.images[0].destination), sha256: "<hash>" },
+    {
+      destination: "imagem-gerada.receipt-test.png",
+      bytes: 36,
+      sha256: "<hash>",
+      mime: "image/png",
+      width: 1600,
+      height: 900,
+      aspectRatio: 1.777778,
+    },
+  );
+  assert.match(receipt.images[0].sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(await fs.readFile(receipt.images[0].destination), pngBytes());
+  assert.equal((output.join("").match(/AGY_IMAGE_RESULT:/g) ?? []).length, 1);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("copyGeneratedImages rejects invalid bytes and an unexpected aspect ratio", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-validation-"));
+  const brain = path.join(root, "brain");
+  await fs.mkdir(brain, { recursive: true });
+  await fs.writeFile(path.join(brain, "fake.png"), "not-an-image");
+  await assert.rejects(
+    copyGeneratedImages(0, path.join(root, "dest"), { write: () => true }, { brainBase: brain }),
+    (error) => error.code === "EAGYIMAGEINVALID",
+  );
+
+  await fs.writeFile(path.join(brain, "fake.png"), pngBytes(1000, 1000));
+  await assert.rejects(
+    copyGeneratedImages(0, path.join(root, "dest"), { write: () => true }, { brainBase: brain, expectedAspectRatio: 16 / 9 }),
+    (error) => error.code === "EAGYIMAGEASPECT",
+  );
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("inspectGeneratedImage rejects an extension/content mismatch", () => {
+  assert.throws(() => inspectGeneratedImage(pngBytes(10, 5), ".jpg"), (error) => error.code === "EAGYIMAGEINVALID");
+});
+
+test("parseExpectedAspectRatio recognizes explicit task ratios", () => {
+  assert.equal(parseExpectedAspectRatio("hero image, aspect ratio 16:9"), 16 / 9);
+  assert.equal(parseExpectedAspectRatio("imagem quadrada sem proporcao explicita"), null);
+});
+
+test("copyGeneratedImages fails closed when output is missing or ambiguous", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-count-"));
+  const brain = path.join(root, "brain");
+  await fs.mkdir(brain, { recursive: true });
+  await assert.rejects(
+    copyGeneratedImages(0, path.join(root, "dest"), { write: () => true }, { brainBase: brain }),
+    (error) => error.code === "EAGYIMAGEMISSING",
+  );
+  await fs.writeFile(path.join(brain, "one.png"), "one");
+  await fs.writeFile(path.join(brain, "two.png"), "two");
+  await assert.rejects(
+    copyGeneratedImages(0, path.join(root, "dest"), { write: () => true }, { brainBase: brain }),
+    (error) => error.code === "EAGYIMAGEAMBIGUOUS",
+  );
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("copyGeneratedImages reports a copy failure and emits no receipt", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-copy-fail-"));
+  const source = path.join(root, "source.png");
+  const destinationFile = path.join(root, "not-a-directory");
+  await fs.writeFile(source, pngBytes());
+  await fs.writeFile(destinationFile, "occupied");
+  const output = [];
+  await assert.rejects(
+    copyGeneratedImages(0, destinationFile, { write: (value) => output.push(String(value)) }, { sourcePath: source }),
+  );
+  assert.equal(output.length, 0);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("concurrent copies into the same output directory use distinct immutable destinations", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-copy-concurrent-"));
+  const dest = path.join(root, "dest");
+  const first = path.join(root, "first.png");
+  const second = path.join(root, "second.png");
+  await fs.writeFile(first, pngBytes(800, 600));
+  await fs.writeFile(second, pngBytes(1600, 900));
+  const [a, b] = await Promise.all([
+    copyGeneratedImages(0, dest, { write: () => true }, { sourcePath: first, runId: "run-a" }),
+    copyGeneratedImages(0, dest, { write: () => true }, { sourcePath: second, runId: "run-b" }),
+  ]);
+  assert.notEqual(a.images[0].destination, b.images[0].destination);
+  assert.equal(a.images[0].width, 800);
+  assert.equal(b.images[0].width, 1600);
+  assert.deepEqual((await fs.readdir(dest)).sort(), [
+    "imagem-gerada.run-a.png",
+    "imagem-gerada.run-b.png",
+  ]);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+function makeImageSpawn({ conversationId, sessionDir, imageDelayMs, closeDelayMs, neverClose = false }) {
+  const state = { child: null, killed: false };
+  const spawn = () => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    let closed = false;
+    const close = (code) => {
+      if (closed) return;
+      closed = true;
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("close", code);
+    };
+    child.kill = () => { state.killed = true; close(1); };
+    state.child = child;
+    queueMicrotask(() => child.stdout.write(`${JSON.stringify({ event: "init", conversation_id: conversationId })}\n`));
+    if (imageDelayMs != null) {
+      setTimeout(() => { void fs.writeFile(path.join(sessionDir, "generated.png"), pngBytes()); }, imageDelayMs);
+    }
+    if (!neverClose) setTimeout(() => close(0), closeDelayMs ?? 40);
+    return child;
+  };
+  return { spawn, state };
+}
+
+test("spawnImageHeadless accepts an image when AGY exits normally after generating it", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-normal-"));
+  const conversationId = "conv-normal";
+  const sessionDir = path.join(root, conversationId);
+  await fs.mkdir(sessionDir, { recursive: true });
+  const fake = makeImageSpawn({ conversationId, sessionDir, imageDelayMs: 5, closeDelayMs: 8 });
+  const result = await spawnImageHeadless("agy", ["--output-format", "stream-json"], {
+    brainBase: root,
+    sinceMs: Date.now(),
+    timeoutMs: 200,
+    _spawn: fake.spawn,
+    _stderr: { write: () => true },
+    pollIntervalMs: 5,
+    stableChecks: 2,
+    stableForMs: 10,
+    postExitGraceMs: 30,
+    terminationWaitMs: 20,
+    _killProcessTree: (_pid, fallback) => { fallback(); return { ok: true, method: "test-tree" }; },
+  });
+  assert.equal(result.conversationId, conversationId);
+  assert.equal(path.basename(result.sourcePath), "generated.png");
+  assert.equal(result.termination.method, "already-exited");
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("spawnImageHeadless finishes when the image appears before AGY exits and kills the process tree", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-hung-"));
+  const conversationId = "conv-hung";
+  const sessionDir = path.join(root, conversationId);
+  await fs.mkdir(sessionDir, { recursive: true });
+  const fake = makeImageSpawn({ conversationId, sessionDir, imageDelayMs: 5, neverClose: true });
+  const killed = [];
+  const result = await spawnImageHeadless("agy", ["--output-format", "stream-json"], {
+    brainBase: root,
+    sinceMs: Date.now(),
+    timeoutMs: 200,
+    _spawn: fake.spawn,
+    _stderr: { write: () => true },
+    pollIntervalMs: 5,
+    stableChecks: 2,
+    stableForMs: 10,
+    terminationWaitMs: 20,
+    _killProcessTree: (pid, fallback) => {
+      killed.push(pid);
+      fallback();
+      return { ok: true, method: "taskkill", pid };
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(killed, [4242]);
+  assert.equal(fake.state.killed, true);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("spawnImageHeadless times out without an image and still kills child and subprocess tree", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-timeout-"));
+  const conversationId = "conv-timeout";
+  const sessionDir = path.join(root, conversationId);
+  await fs.mkdir(sessionDir, { recursive: true });
+  const fake = makeImageSpawn({ conversationId, sessionDir, neverClose: true });
+  const killed = [];
+  await assert.rejects(
+    spawnImageHeadless("agy", ["--output-format", "stream-json"], {
+      brainBase: root,
+      sinceMs: Date.now(),
+      timeoutMs: 35,
+      _spawn: fake.spawn,
+      _stderr: { write: () => true },
+      pollIntervalMs: 5,
+      _killProcessTree: (pid, fallback) => {
+        killed.push(pid);
+        fallback();
+        return { ok: true, method: "taskkill", pid };
+      },
+    }),
+    (error) => error.code === "ETIMEDOUT",
+  );
+  assert.deepEqual(killed, [4242]);
+  assert.equal(fake.state.killed, true);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("killProcessTree uses Windows taskkill tree and force switches", () => {
+  const calls = [];
+  const result = killProcessTree(9876, () => assert.fail("direct fallback should not run"), {
+    platform: "win32",
+    _spawnSync: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    },
+  });
+  assert.deepEqual(calls[0].args, ["/pid", "9876", "/T", "/F"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.method, "taskkill");
+});
+
+test("concurrent image observers bind only to their own conversation directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-concurrent-"));
+  const sinceMs = Date.now();
+  const ids = ["conv-a", "conv-b"];
+  await Promise.all(ids.map((id) => fs.mkdir(path.join(root, id), { recursive: true })));
+  const waits = ids.map((id) => waitForGeneratedImage({
+    brainBase: root,
+    sinceMs,
+    timeoutMs: 200,
+    getConversationId: () => id,
+    pollIntervalMs: 5,
+    stableChecks: 2,
+    stableForMs: 10,
+  }));
+  await fs.writeFile(path.join(root, "conv-a", "a.png"), pngBytes(800, 600));
+  await fs.writeFile(path.join(root, "conv-b", "b.png"), pngBytes(1600, 900));
+  const [a, b] = await Promise.all(waits);
+  assert.equal(path.basename(a.sourcePath), "a.png");
+  assert.equal(path.basename(b.sourcePath), "b.png");
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("image observer ignores an old image already present in the selected brain session", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-old-"));
+  const conversationId = "conv-old";
+  const sessionDir = path.join(root, conversationId);
+  await fs.mkdir(sessionDir, { recursive: true });
+  const oldPath = path.join(sessionDir, "old.png");
+  await fs.writeFile(oldPath, pngBytes());
+  const oldDate = new Date(Date.now() - 10_000);
+  await fs.utimes(oldPath, oldDate, oldDate);
+  const closedAt = Date.now() - 50;
+  await assert.rejects(
+    waitForGeneratedImage({
+      brainBase: root,
+      sinceMs: Date.now(),
+      timeoutMs: 100,
+      getConversationId: () => conversationId,
+      getProcessState: () => ({ closed: true, closedAt }),
+      pollIntervalMs: 5,
+      postExitGraceMs: 20,
+    }),
+    (error) => error.code === "EAGYIMAGEMISSING",
+  );
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("image observer waits for a partially-written file to become valid", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-partial-"));
+  const conversationId = "conv-partial";
+  const sessionDir = path.join(root, conversationId);
+  await fs.mkdir(sessionDir, { recursive: true });
+  const imagePath = path.join(sessionDir, "partial.png");
+  const wait = waitForGeneratedImage({
+    brainBase: root,
+    sinceMs: Date.now(),
+    timeoutMs: 250,
+    getConversationId: () => conversationId,
+    pollIntervalMs: 5,
+    stableChecks: 2,
+    stableForMs: 10,
+    invalidGraceMs: 80,
+  });
+  await fs.writeFile(imagePath, pngBytes().subarray(0, 8));
+  setTimeout(() => { void fs.writeFile(imagePath, pngBytes()); }, 30);
+  const result = await wait;
+  assert.equal(result.metadata.width, 1600);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("image observer rejects multiple candidates and invalid signatures", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-image-invalid-"));
+  const multiDir = path.join(root, "conv-multi");
+  await fs.mkdir(multiDir, { recursive: true });
+  const sinceMs = Date.now();
+  await fs.writeFile(path.join(multiDir, "one.png"), pngBytes());
+  await fs.writeFile(path.join(multiDir, "two.png"), pngBytes());
+  await assert.rejects(
+    waitForGeneratedImage({
+      brainBase: root,
+      sinceMs,
+      timeoutMs: 100,
+      getConversationId: () => "conv-multi",
+      pollIntervalMs: 5,
+    }),
+    (error) => error.code === "EAGYIMAGEAMBIGUOUS",
+  );
+
+  const invalidDir = path.join(root, "conv-invalid");
+  await fs.mkdir(invalidDir, { recursive: true });
+  await fs.writeFile(path.join(invalidDir, "fake.png"), "not an image");
+  const closedAt = Date.now();
+  await assert.rejects(
+    waitForGeneratedImage({
+      brainBase: root,
+      sinceMs,
+      timeoutMs: 100,
+      getConversationId: () => "conv-invalid",
+      getProcessState: () => ({ closed: true, closedAt }),
+      pollIntervalMs: 5,
+      stableChecks: 2,
+      stableForMs: 10,
+      postExitGraceMs: 30,
+    }),
+    (error) => error.code === "EAGYIMAGEINVALID",
+  );
+  await fs.rm(root, { recursive: true, force: true });
+});
 
 test("appendRunJournal keeps an append-only recoverable execution record", async () => {
   const journalPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "agy-runs-")), "runs.jsonl");
@@ -1111,13 +1473,15 @@ test("fallback catalog treats image generation as a tool rather than a nano-bana
   assert.equal(FALLBACK_MODEL_CATALOG.some(({ slug }) => slug === "nano-banana"), false);
 });
 
-test("buildImagePrompt contains generate_imagem constraint", () => {
+test("buildImagePrompt calls generate_image once and forbids repository investigation", () => {
   const prompt = buildImagePrompt({
     task: "a futuristic city at night",
     context: { included: [], skipped: [] },
   });
-  assert.match(prompt, /generate_imagem/);
+  assert.match(prompt, /generate_image tool exactly once/);
   assert.match(prompt, /a futuristic city at night/);
+  assert.match(prompt, /Do not call grep_search/);
+  assert.doesNotMatch(prompt, /write_to_file to the directory/);
 });
 
 test("buildImagePrompt renders task block and image-specific constraints", () => {
@@ -1127,7 +1491,7 @@ test("buildImagePrompt renders task block and image-specific constraints", () =>
   });
   assert.match(prompt, /<task>\s*a red balloon\s*<\/task>/);
   assert.match(prompt, /image generation assistant/);
-  assert.match(prompt, /write_to_file/);
+  assert.match(prompt, /IMAGE_GENERATION_COMPLETE/);
 });
 
 test("buildImagePrompt includes context inventory when files are provided", () => {

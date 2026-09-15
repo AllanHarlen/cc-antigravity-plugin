@@ -214,6 +214,12 @@ $antigravity-integration <tarefa>
 | `--max-file-bytes <n>` | Número máximo de bytes por arquivo. Padrão: `32768` |
 | `--generate-image`, `--generate-imagem` | Gera imagem com a tool `generate_imagem` sem trocar o modelo |
 | `--output-dir <path>` | Diretório onde as imagens geradas são salvas. Padrão: diretório atual. |
+
+A geração falha de forma segura: cada chamada deve resolver exatamente uma imagem
+nova. O sucesso emite `AGY_IMAGE_RESULT` com destino, bytes, SHA-256, MIME,
+dimensões e proporção. Zero ou múltiplos candidatos, bytes inválidos, extensão
+divergente e uma proporção explícita fora da tolerância causam falha; um destino
+existente com conteúdo diferente nunca é sobrescrito.
 | `--print-command` | Imprime o comando `agy` resolvido sem executar |
 
 **Padrões agênticos:** por padrão, `--dangerously-skip-permissions` é repassado e o cwd é adicionado ao workspace do AGY via `--add-dir`. Use `--read-only` para desativar.

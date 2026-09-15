@@ -390,7 +390,95 @@ test("main warns and omits an unknown model instead of sending it to AGY", async
 test("main --generate-image never selects nano-banana as a model", async () => {
   const { io } = await runMain(["--generate-image", "--print-command", "a sunset"]);
   assert.doesNotMatch(io.stdout, /nano-banana/);
-  assert.match(io.stdout, /generate_imagem/);
+  assert.match(io.stdout, /generate_image/);
+  assert.match(io.stdout, /--output-format" "stream-json/);
+  assert.doesNotMatch(io.stdout, /--add-dir/);
+});
+
+test("main --generate-image accepts --interactive by normalizing it to supervised headless mode", async () => {
+  let capturedArgs;
+  let copied = 0;
+  const { exitCode } = await runMain(["--generate-image", "--interactive", "a catalog hero"], {
+    _loadNodePty: () => { throw new Error("PTY must not be loaded for one-shot image generation"); },
+    _spawnImageHeadless: async (_agyExe, args) => {
+      capturedArgs = args;
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        result: null,
+        conversationId: "conv-interactive-image",
+        sourcePath: "generated.png",
+        termination: { ok: true, method: "taskkill" },
+      };
+    },
+    _copyGeneratedImages: async () => {
+      copied += 1;
+      return { schemaVersion: 1, count: 1, images: [{ destination: "image.png" }] };
+    },
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.ok(capturedArgs.includes("stream-json"));
+  assert.ok(capturedArgs.includes("--print"));
+  assert.ok(!capturedArgs.includes("--prompt-interactive"));
+  assert.equal(copied, 1);
+});
+
+test("main --generate-image requires the structured image copy step before returning success", async () => {
+  let calls = 0;
+  const receipt = { schemaVersion: 1, count: 1, images: [{ file: "hero.webp", sha256: "a".repeat(64) }] };
+  const { exitCode } = await runMain(["--generate-image", "a catalog hero"], {
+    _spawnImageHeadless: async () => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      result: null,
+      conversationId: "conv-image",
+      sourcePath: "generated.webp",
+      termination: { ok: true, method: "taskkill" },
+    }),
+    _copyGeneratedImages: async () => { calls += 1; return receipt; },
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(calls, 1);
+});
+
+test("main --generate-image fails when AGY exits zero without producing an image", async () => {
+  const missing = Object.assign(new Error("AGY reported success but no generated image was found"), { code: "EAGYIMAGEMISSING" });
+  const { exitCode, io } = await runMain(["--generate-image", "a catalog hero"], {
+    _spawnImageHeadless: async () => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      result: null,
+      conversationId: "conv-image",
+      sourcePath: null,
+      imageError: missing,
+      termination: { ok: true, method: "already-exited" },
+    }),
+  });
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stderr, /no generated image was found/);
+});
+
+test("main --generate-image preserves AUTH_REQUIRED classification", async () => {
+  let copied = false;
+  const { exitCode, io } = await runMain(["--generate-image", "a catalog hero"], {
+    _spawnImageHeadless: async () => ({
+      exitCode: 1,
+      stdout: "Not authenticated. Please sign in.",
+      stderr: "",
+      result: null,
+      conversationId: null,
+      sourcePath: null,
+      imageError: Object.assign(new Error("no image"), { code: "EAGYIMAGEMISSING" }),
+      termination: { ok: true, method: "already-exited" },
+    }),
+    _copyGeneratedImages: async () => { copied = true; },
+  });
+  assert.equal(exitCode, EXIT_AUTH_REQUIRED);
+  assert.match(io.stdout, /AUTH_REQUIRED/);
+  assert.equal(copied, false);
 });
 
 test("main converts async spawn ENOENT into EXIT_AGY_MISSING", async () => {

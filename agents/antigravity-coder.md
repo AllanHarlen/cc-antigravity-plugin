@@ -77,6 +77,10 @@ work:
 - "no diretório X" / "from ./Y" / monorepo slice → `--add-dir <path>`.
 - image / asset / logo / hero / banner / ilustração generation → `--generate-image`
   (uses AGY's `generate_imagem` tool without changing models; pass `--output-dir <assets>`).
+  Each invocation must produce exactly one new image and an `AGY_IMAGE_RESULT`
+  receipt (destination, byte count, SHA-256, MIME, dimensions and aspect ratio).
+  Missing, ambiguous, invalid, or wrongly proportioned output is a failure; an
+  existing different file is never overwritten.
 - named custom agent → `--agent <name>`; use `--interactive` only for a human PTY session.
 - explicit reasoning effort → `--effort low|medium|high` (never infer it from the model slug).
 - live fan-out visibility → `--format stream-json --parallel`.

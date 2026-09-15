@@ -214,6 +214,12 @@ $antigravity-integration <task>
 | `--max-file-bytes <n>` | Maximum bytes per file. Default: `32768` |
 | `--generate-image`, `--generate-imagem` | Generate an image with AGY's `generate_imagem` tool without changing models |
 | `--output-dir <path>` | Directory where generated images are saved. Default: current directory. |
+
+Image generation is fail-closed: one invocation must resolve exactly one new
+image. Success emits `AGY_IMAGE_RESULT` with destination, byte count, SHA-256,
+MIME type, dimensions, and aspect ratio. Zero or multiple candidates, invalid
+image bytes, extension mismatches, and an explicit requested aspect ratio outside
+tolerance fail; a different existing destination is never overwritten.
 | `--print-command` | Print the resolved `agy` command without executing |
 
 **Agentic defaults:** by default, `--dangerously-skip-permissions` is passed and cwd is added to AGY's workspace via `--add-dir`. Use `--read-only` to disable.
