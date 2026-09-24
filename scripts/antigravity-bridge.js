@@ -180,7 +180,9 @@ Options:
   --mode <mode>              Permission mode: plan or accept-edits.
   --json-schema <value>      JSON Schema string or path. Implies --format json.
   --disable-slash-commands   Treat task text as data (default headless, except --read-only;
-                             AGY 1.1.16 otherwise ignores --mode plan).
+                             AGY 1.1.16 otherwise ignores --mode plan). Passing it explicitly
+                             with --read-only is honored (task text stays data instead of
+                             being interpreted as a slash command).
   --allow-slash-commands     Allow slash-command and skill expansion in headless prompts.
   --generate-image           Generate an image using AGY's generate_imagem tool.
                              Does not override the selected model.
@@ -236,11 +238,12 @@ Exit codes:
                         including EMPTY_RESPONSE close to the effective timeout
   13  AGY_MISSING     — Antigravity CLI not found on PATH
 
-  EMPTY_RESPONSE: with --output-file, an empty response and exit 0 from agy is
-  never treated as success — it is classified (bridge.classified in the log,
-  and a {"status":"EMPTY_RESPONSE",...} line on stdout) and exits 1 or 12
-  depending on how close to the effective timeout it happened. The 0-byte
-  file is never written.
+  EMPTY_RESPONSE: an empty response and exit 0 from agy is never treated as
+  success, with or without --output-file (including plain stdout redirection,
+  e.g. \`> file.json\`) — it is classified (bridge.classified in the log, and a
+  {"status":"EMPTY_RESPONSE",...} line on stdout) and exits 1 or 12 depending
+  on how close to the effective timeout it happened. With --output-file, the
+  0-byte file is never written.
 
 Logging:
   Plugin events are always written to a JSONL log file. Every invocation logs
@@ -483,6 +486,14 @@ export function parseCliArgs(argv) {
   // case above still mutates immediately) so --read-only can be enforced as a
   // terminal boundary after the loop, regardless of flag order.
   let sawSkipPermissionsFlag = false;
+  // Tracked separately from parsed.disableSlashCommands for the same reason:
+  // a real run (OficinaAI, 2026-09-22) passed --read-only --disable-slash-commands
+  // together, expecting the task text to be treated as data, but the read-only
+  // block below used to force disableSlashCommands back to false unconditionally
+  // — discarding the explicit flag — which let AGY's slash-command expansion
+  // reinterpret --mode plan as if the user had typed the bare "/plan" slash
+  // command with no goal, instead of running the read-only review task at all.
+  let sawDisableSlashCommandsFlag = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -584,6 +595,7 @@ export function parseCliArgs(argv) {
         break;
       case "--disable-slash-commands":
         parsed.disableSlashCommands = true;
+        sawDisableSlashCommandsFlag = true;
         break;
       case "--allow-slash-commands":
         parsed.disableSlashCommands = false;
@@ -699,8 +711,14 @@ export function parseCliArgs(argv) {
     parsed.mode = "plan";
     parsed.skipPermissions = false;
     // AGY 1.1.16 warns that --mode plan has no effect while slash expansion is
-    // disabled. Preserve the stronger no-write guarantee for read-only runs.
-    parsed.disableSlashCommands = false;
+    // disabled, so the default for read-only (no explicit flag either way) is
+    // to enable expansion. But an explicit --disable-slash-commands is the
+    // caller asking for the task text to be treated as data — honor it rather
+    // than silently discarding it, since AGY has no other way to distinguish
+    // "review this text" from "run this slash command".
+    if (!sawDisableSlashCommandsFlag) {
+      parsed.disableSlashCommands = false;
+    }
   }
   if (parsed.jsonSchema) parsed.format = "json";
 
@@ -2779,7 +2797,16 @@ async function mainImpl(argv = process.argv.slice(2), {
     // para ser timeout). `elapsedMs` perto do timeout efetivo classifica como
     // TIMEOUT; muito mais rapido do que isso classifica como ERROR generico —
     // as duas com o mesmo sinal estruturado, nunca silencio.
-    if (parsed.outputFile && response.trim() === "" && String(headless.exitCode) === "0") {
+    //
+    // Achado 9: a checagem original so rodava com `--output-file`. Um caller
+    // que so redireciona stdout via shell (`> arquivo`, o padrao documentado
+    // em subagent-prompts.md e o que a run real do OficinaAI usou) caia direto
+    // no `return headless.exitCode` no fim da funcao com exit 0 e zero bytes —
+    // silent success. Isso aconteceu de verdade: `--read-only` com AGY
+    // recusando `run_command` no headless ("no output produced ... auto-denied")
+    // devolveu stdout vazio e exit 0 sem nenhum diagnostico. A checagem agora
+    // vale para qualquer destino de saida.
+    if (response.trim() === "" && String(headless.exitCode) === "0") {
       const effectiveTimeoutMs = timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs;
       const elapsedMs = Date.now() - spawnStartMs;
       const nearTimeout = elapsedMs >= effectiveTimeoutMs * 0.8;

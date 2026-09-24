@@ -1207,6 +1207,28 @@ test("parseCliArgs --skip-permissions is a no-op when already true by default", 
   assert.equal(parsed.skipPermissions, true);
 });
 
+// Real run (OficinaAI, 2026-09-22): --read-only --disable-slash-commands
+// together used to have the read-only block silently force
+// disableSlashCommands back to false, discarding the explicit flag. AGY then
+// expanded --mode plan as if the user had typed the bare "/plan" slash
+// command, and the read-only review task never actually ran.
+test("parseCliArgs --read-only honors an explicit --disable-slash-commands instead of discarding it", () => {
+  const parsed = parseCliArgs(["--read-only", "--disable-slash-commands", "analyze this"]);
+  assert.equal(parsed.readOnly, true);
+  assert.equal(parsed.mode, "plan");
+  assert.equal(parsed.disableSlashCommands, true, "explicit flag must survive the read-only block");
+});
+
+test("parseCliArgs --disable-slash-commands then --read-only (flag order reversed) still honors it", () => {
+  const parsed = parseCliArgs(["--disable-slash-commands", "--read-only", "analyze this"]);
+  assert.equal(parsed.disableSlashCommands, true);
+});
+
+test("parseCliArgs --read-only with --allow-slash-commands still leaves expansion enabled (unchanged default)", () => {
+  const parsed = parseCliArgs(["--read-only", "--allow-slash-commands", "analyze this"]);
+  assert.equal(parsed.disableSlashCommands, false);
+});
+
 // ─── classifyAgyOutput ────────────────────────────────────────────────────────
 
 test("classifyAgyOutput returns QUOTA_EXAUSTED for rate-limit text", () => {

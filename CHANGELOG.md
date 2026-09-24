@@ -2,6 +2,26 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.4.2] - 2026-09-24 - `--read-only` headless: flag honrada e resposta vazia nunca e sucesso
+
+Motivacao: numa run real do Orquestrador (OficinaAI, 2026-09-22), tres tentativas de review de
+front-end em `--read-only` falharam de formas diferentes e o bloqueio so foi diagnosticado
+lendo o log de eventos do bridge linha a linha.
+
+- `--read-only` combinado com `--disable-slash-commands` explicito descartava a flag em silencio
+  (o bloco de enforcamento de `--read-only` sempre forcava `disableSlashCommands = false`). O AGY
+  entao expandiu `--mode plan` como se o usuario tivesse digitado o slash command `/plan` sem
+  argumento, e a task de review nunca rodou de fato. A flag explicita agora sobrevive; o default
+  (sem flag) continua sendo `false`, preservando a mitigacao documentada do bug do AGY 1.1.16.
+- A deteccao de `EMPTY_RESPONSE` (resposta vazia + exit 0 do agy nunca e sucesso silencioso) so
+  rodava com `--output-file`. Chamando o bridge com redirecionamento de stdout simples (`> arquivo`,
+  o padrao documentado em `subagent-prompts.md` e o que a run real usou) uma negacao de ferramenta
+  do AGY em headless read-only (`jetski: no output produced ... auto-denied`) resultava em stdout
+  vazio e exit 0 sem nenhum diagnostico — um falso "review passou". A checagem agora vale para
+  qualquer destino de saida.
+- 5 testes novos cobrindo os dois casos, incluindo o texto de erro real do AGY. Suite completa:
+  173/173.
+
 ## [4.4.0] - 2026-09-13 - Contexto sem descarte: stdin em qualquer plataforma e `--design-system`
 
 Motivacao: numa run real do Orquestrador (12/09) o bridge 4.2.1 descartou os 40 arquivos do
