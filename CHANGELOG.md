@@ -2,6 +2,12 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.5.0] - 2026-09-25 - `components.css` no `--design-system` e review read-only sem `run_command`
+
+- `--design-system`: `components.css` entra em `DESIGN_SYSTEM_CORE_FILES` (logo depois de `tokens.css`) e vai inteiro no prompt, fora de `--max-files`/`--max-file-bytes`. O bloco `<design_system>` instrui a importar essa folha depois de `tokens.css` e a nunca copiar o CSS do preview nem as classes de andaime de `components.html`. Motivo: numa run real (OficinaAI, 2026-09-22) Button/Card/Input/Dialog chegaram ao build final sem estilo porque as regras de componente so existiam no preview; o cc-pensador 2.38.0 passa a gerar `components.css`.
+- `--read-only`: o prompt deixa de oferecer `run_command` "somente leitura". Em execucao headless o AGY nega automaticamente a permissao `command`, e a chamada abortava a analise sem saida (review de front-end da mesma run). A inspecao fica restrita a `grep_search`, `view_file` e `list_dir`.
+- Testes: fixture de pacote de design com `components.css` na ordem dos arquivos centrais; prompt read-only sem `run_command`.
+
 ## [4.4.2] - 2026-09-24 - `--read-only` headless: flag honrada e resposta vazia nunca e sucesso
 
 Motivacao: numa run real do Orquestrador (OficinaAI, 2026-09-22), tres tentativas de review de

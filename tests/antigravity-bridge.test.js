@@ -669,6 +669,10 @@ test("buildAntigravityPrompt uses non-mutating constraints in read-only mode", (
   assert.match(prompt, /read-only analysis assistant/);
   assert.match(prompt, /Do not call write_to_file/);
   assert.doesNotMatch(prompt, /create and edit files/);
+  // Headless read-only nao aprova a permissao "command": o prompt nao pode
+  // oferecer run_command, senao o AGY aborta a analise sem saida.
+  assert.match(prompt, /or run_command\./);
+  assert.doesNotMatch(prompt, /read-only run_command/);
 });
 
 test("buildAntigravityArgs supports interactive agent mode", () => {
@@ -1570,6 +1574,7 @@ async function makeDesignPackage(root, { tokensBytes = 40_000 } = {}) {
   );
   await fs.writeFile(path.join(root, "DESIGN.md"), "# Design\n");
   await fs.writeFile(path.join(root, "components.html"), "<button class=\"btn\">ok</button>\n");
+  await fs.writeFile(path.join(root, "components.css"), ".btn{background:var(--accent);}\n");
   await fs.writeFile(path.join(root, "preview", "colors.html"), "<p>colors</p>\n");
   await fs.writeFile(path.join(root, "system", "kit.html"), "<p>kit</p>\n");
 }
@@ -1596,6 +1601,7 @@ test("collectDesignSystemContext inlines core files in full and lists the rest o
   assert.deepEqual(context.included.map((f) => f.path), [
     `${root}/DESIGN.md`,
     `${root}/tokens.css`,
+    `${root}/components.css`,
     `${root}/components.html`,
   ]);
   const tokens = context.included.find((f) => f.path.endsWith("tokens.css"));
