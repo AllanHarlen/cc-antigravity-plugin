@@ -532,6 +532,27 @@ test("an empty response very close to the effective timeout is EXIT_TIMEOUT, not
   assert.match(io.stdout, /"status":"EMPTY_RESPONSE"/);
 });
 
+// Achado 9 / real run (OficinaAI, 2026-09-22): the EMPTY_RESPONSE check used to
+// require --output-file. The orchestrator's actual documented invocation
+// redirects stdout with plain shell `>` instead, and AGY denied a run_command
+// call in --read-only headless mode ("jetski: no output produced — a tool
+// required the \"command\" permission that headless mode cannot prompt for, so
+// it was auto-denied"), producing empty stdout with exit 0. Without
+// --output-file, that used to fall straight through to a silent EXIT_SUCCESS
+// with zero bytes and no diagnostic — a false-positive "review passed".
+test("an empty response WITHOUT --output-file (plain stdout redirection) and exit 0 is still EXIT_ERROR, not silent success", async () => {
+  const { exitCode, io } = await runMain(["--read-only", "--format", "json", "task"], {
+    spawnResult: {
+      stdout: "",
+      stderr: "jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied.\n",
+      exitCode: 0,
+    },
+    _conPtyTimeoutMs: 10_000,
+  });
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stdout, /"status":"EMPTY_RESPONSE"/);
+});
+
 test("main logs exactly one terminal bridge.exit event per invocation, with duration and exit code", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-bridge-exit-"));
   const logPath = path.join(dir, "plugin-test.jsonl");
