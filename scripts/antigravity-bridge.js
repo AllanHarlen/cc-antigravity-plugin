@@ -1112,8 +1112,10 @@ ${file.content.replaceAll("</", "<\\/")}
 
   const executionConstraints = readOnly
     ? `- You are a read-only analysis assistant. Analyze, inspect, and report without modifying files.
-- Do not call write_to_file, replace_file_content, multi_replace_file_content, or any mutating command.
-- Use grep_search, view_file, list_dir, and read-only run_command operations to inspect the workspace.`
+- Do not call write_to_file, replace_file_content, multi_replace_file_content, or run_command.
+- Inspect the workspace only with grep_search, view_file, and list_dir. Headless read-only runs cannot
+  approve the "command" permission, so any run_command call is auto-denied and aborts the analysis
+  with no output.`
     : `- You are an agentic coding assistant. Complete the task fully using your available tools.
 - Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
 - Use grep_search, view_file, and list_dir to explore and search the workspace.

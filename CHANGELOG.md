@@ -2,6 +2,12 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.4.3] - 2026-09-25 - `--read-only` headless sem `run_command`
+
+- `--read-only`: o prompt deixa de oferecer `run_command` "somente leitura". Em execucao headless o AGY nega automaticamente a permissao `command`, e a chamada abortava a analise sem saida (observado num review de front-end em `--read-only`, 2026-09-22). A inspecao fica restrita a `grep_search`, `view_file` e `list_dir`.
+- Fronteira de responsabilidade (decisao de revisao do PR): o bridge e transporte — monta o prompt com os arquivos que recebe, chama a CLI e traduz os codigos de saida. Uma versao anterior deste PR incluia `components.css` nos arquivos centrais do `--design-system` e uma regra no bloco `<design_system>` ("importe `components.css` depois de `tokens.css`, nunca copie o andaime do preview"); isso e politica do fluxo Pensador -> Orquestrador e foi retirado. A regra vive nos prompts de subagente do `cc-orchestrador-subagents` (4.25.0) e do `cc-executor-subagents` (2.11.0); o `components.css` chega ao AGY como arquivo sob demanda do pacote, e o prompt enviado ao AGY nao cita nenhum projeto consumidor.
+- Testes: prompt read-only sem `run_command` e sem nome de projeto; o bloco `<design_system>` nao carrega regra de fluxo de um produtor especifico e `DESIGN_SYSTEM_CORE_FILES` fica fixado.
+
 ## [4.4.2] - 2026-09-24 - `--read-only` headless: flag honrada e resposta vazia nunca e sucesso
 
 Motivacao: numa run real do Orquestrador (OficinaAI, 2026-09-22), tres tentativas de review de

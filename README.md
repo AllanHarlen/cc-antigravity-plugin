@@ -200,7 +200,7 @@ $antigravity-integration <task>
 | `--allow-slash-commands` | Re-enable slash-command expansion (disabled by default headless) |
 | `--parallel` | Allow AGY to split the task among multiple native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). AGY decides how many. Works in default headless mode. |
 | `--subagent-model <name>` | Model for spawned subagents (passed via prompt — AGY has no per-subagent CLI flag). Enables `--parallel` automatically. Default: model of main session. |
-| `--read-only` | Forces native `--mode plan`, disables skip-permissions/cwd auto-add, and keeps slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode |
+| `--read-only` | Forces native `--mode plan`, disables skip-permissions/cwd auto-add, and keeps slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. The prompt restricts inspection to `grep_search`/`view_file`/`list_dir`: headless runs cannot approve the `command` permission, so a `run_command` call is auto-denied and aborts the analysis (4.4.3) |
 | `--continue`, `-c` | Resume the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation by ID |
 | `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |

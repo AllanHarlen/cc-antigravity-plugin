@@ -11,7 +11,9 @@ import {
   buildAntigravityArgs,
   appendRunJournal,
   buildAntigravityPrompt,
+  buildDesignSystemBlock,
   buildImagePrompt,
+  DESIGN_SYSTEM_CORE_FILES,
   checkAgyConnectivity,
   classifyAgyOutput,
   collectContextFiles,
@@ -669,6 +671,10 @@ test("buildAntigravityPrompt uses non-mutating constraints in read-only mode", (
   assert.match(prompt, /read-only analysis assistant/);
   assert.match(prompt, /Do not call write_to_file/);
   assert.doesNotMatch(prompt, /create and edit files/);
+  // Headless read-only nao aprova a permissao "command": o prompt nao pode
+  // oferecer run_command, senao o AGY aborta a analise sem saida.
+  assert.match(prompt, /or run_command\./);
+  assert.doesNotMatch(prompt, /read-only run_command/);
 });
 
 test("buildAntigravityArgs supports interactive agent mode", () => {
@@ -1624,6 +1630,23 @@ test("collectDesignSystemContext prefers the resolved/ package and names it afte
   assert.equal(context.packages[0].id, "bmw");
   assert.equal(context.packages[0].root, "bmw/resolved");
   assert.deepEqual(context.included.map((f) => f.path), ["bmw/resolved/design-contract.json"]);
+});
+
+// The bridge is transport: it inlines the package files it is given and states their authority.
+// Workflow policy of a specific producer (which stylesheet to import, which scaffolding classes to
+// avoid, which run motivated a rule) belongs in the caller's task prompt, never in this block.
+test("the design_system block carries no producer-specific workflow rule", () => {
+  const block = buildDesignSystemBlock([{ id: "acme", root: "ds/acme", coreFiles: ["ds/acme/tokens.css"], onDemandCount: 1 }]);
+  assert.doesNotMatch(block, /components\.css|\.grid|scaffolding|import .* stylesheet/i);
+  assert.doesNotMatch(block, /OficinaAI|Pensador|Orquestrador|Orchestrador/i);
+  assert.deepEqual([...DESIGN_SYSTEM_CORE_FILES], [
+    "design-contract.json", "DESIGN.md", "tokens.css", "components.html", "USAGE.md", "components.manifest.json", "assets/manifest.json",
+  ]);
+});
+
+test("the read-only prompt names no consumer project", () => {
+  const prompt = buildAntigravityPrompt({ task: "Analyze", context: { included: [], skipped: [] }, readOnly: true });
+  assert.doesNotMatch(prompt, /OficinaAI|Pensador|Orquestrador|Orchestrador/i);
 });
 
 test("collectDesignSystemContext rejects a directory that is not an Open Design package", async () => {

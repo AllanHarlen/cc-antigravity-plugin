@@ -200,7 +200,7 @@ $antigravity-integration <tarefa>
 | `--allow-slash-commands` | Reativa expansão de slash commands (desativada por padrão headless) |
 | `--parallel` | Permite que o AGY divida a tarefa entre múltiplos subagentes Gemini nativos (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). O próprio AGY decide quantos. Funciona no modo headless padrão. |
 | `--subagent-model <name>` | Modelo que os subagentes spawnados devem usar (transmitido via prompt — o AGY não tem flag de CLI por subagente). Ativa `--parallel` automaticamente. Padrão: o modelo da sessão principal. |
-| `--read-only` | Força `--mode plan`, desativa skip-permissions/auto-add do cwd e mantém slash expansion ativa porque o AGY 1.1.16 ignora plan mode caso contrário |
+| `--read-only` | Força `--mode plan`, desativa skip-permissions/auto-add do cwd e mantém slash expansion ativa porque o AGY 1.1.16 ignora plan mode caso contrário. O prompt restringe a inspeção a `grep_search`/`view_file`/`list_dir`: execução headless não aprova a permissão `command`, então uma chamada `run_command` é negada automaticamente e aborta a análise (4.4.3) |
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
 | `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
 | `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
