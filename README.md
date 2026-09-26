@@ -189,7 +189,7 @@ $antigravity-integration <task>
 | `--dirs <path,...>` | Recursively inject directories as inline context in the prompt |
 | `--files <glob,...>` | Inject files matching comma-separated globs |
 | `--priority-files <path,...>` | Relative paths to keep ahead of the `--max-files` cutoff. Without it, files are kept in plain alphabetical order, so a large match set silently drops whatever sorts last. |
-| `--design-system <dir,...>` | Hand one or more Open Design packages to AGY without truncation (uses `<dir>/resolved` when present). Core files — `design-contract.json`, `DESIGN.md`, `tokens.css`, `components.css`, `components.html`, `USAGE.md`, `components.manifest.json`, `assets/manifest.json` — are inlined in full, ahead of and outside `--max-files`/`--max-file-bytes`; other package files are listed for on-demand `view_file` reads. Adds a `<design_system>` block that marks the package as authoritative and keeps its name out of product copy. |
+| `--design-system <dir,...>` | Hand one or more Open Design packages to AGY without truncation (uses `<dir>/resolved` when present). Core files — `design-contract.json`, `DESIGN.md`, `tokens.css`, `components.html`, `USAGE.md`, `components.manifest.json`, `assets/manifest.json` — are inlined in full, ahead of and outside `--max-files`/`--max-file-bytes`; other package files are listed for on-demand `view_file` reads. Adds a `<design_system>` block that marks the package as authoritative and keeps its name out of product copy. |
 | `--add-dir <path>` | Add directory to AGY's native workspace via `--add-dir`; repeatable |
 | `--model <name>` | Native AGY slug or alias resolved from `agy models`; omitted by default to preserve the user's AGY `/model` |
 | `--format <format>` | `text`, `json`, or `stream-json`; JSON is the headless default |
@@ -200,7 +200,7 @@ $antigravity-integration <task>
 | `--allow-slash-commands` | Re-enable slash-command expansion (disabled by default headless) |
 | `--parallel` | Allow AGY to split the task among multiple native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). AGY decides how many. Works in default headless mode. |
 | `--subagent-model <name>` | Model for spawned subagents (passed via prompt — AGY has no per-subagent CLI flag). Enables `--parallel` automatically. Default: model of main session. |
-| `--read-only` | Forces native `--mode plan`, disables skip-permissions/cwd auto-add, and keeps slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. The prompt restricts inspection to `grep_search`/`view_file`/`list_dir`: headless runs cannot approve the `command` permission, so a `run_command` call is auto-denied and aborts the analysis (4.5.0) |
+| `--read-only` | Forces native `--mode plan`, disables skip-permissions/cwd auto-add, and keeps slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. The prompt restricts inspection to `grep_search`/`view_file`/`list_dir`: headless runs cannot approve the `command` permission, so a `run_command` call is auto-denied and aborts the analysis (4.4.3) |
 | `--continue`, `-c` | Resume the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation by ID |
 | `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |

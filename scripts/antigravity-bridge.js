@@ -25,7 +25,6 @@ export const DESIGN_SYSTEM_CORE_FILES = [
   "design-contract.json",
   "DESIGN.md",
   "tokens.css",
-  "components.css",
   "components.html",
   "USAGE.md",
   "components.manifest.json",
@@ -169,7 +168,7 @@ Options:
                              a large match set silently drops whichever paths sort last.
   --design-system <dir,...>  Open Design package(s) to hand to AGY without truncation. Uses
                              <dir>/resolved when present. Core files (design-contract.json,
-                             DESIGN.md, tokens.css, components.css, components.html, USAGE.md,
+                             DESIGN.md, tokens.css, components.html, USAGE.md,
                              components.manifest.json, assets/manifest.json) are inlined in
                              full, ahead of and outside --max-files/--max-file-bytes; every
                              other package file is listed for on-demand view_file reads.
@@ -1043,7 +1042,6 @@ export function buildDesignSystemBlock(packages = []) {
 <design_system id="${pkg.id}" root="${pkg.root}">
 - Authoritative visual package. Its core files are inlined in full in <context_files>: ${pkg.coreFiles.join(", ") || "none"}.
 - Build UI from its tokens (var(--*)) and the component patterns and states in components.html; do not invent colors, spacing, radii, shadows or font stacks.
-- Import components.css (when present) in the global stylesheet right after tokens.css: it is the only component stylesheet of the package. Never copy preview CSS or the scaffolding classes of components.html (.page, .scope, .grid, .state) into the product.
 - ${pkg.onDemandCount} other package file(s) are listed in <context_inventory> as design-system-on-demand; read them with view_file only when a decision needs them.
 - "${pkg.id}" identifies where this package came from, not the product being built. Never put that name or its brand wordmarks into product UI text, page titles, metadata, alt text or code comments unless the task explicitly asks for it.
 </design_system>`,
@@ -1117,7 +1115,7 @@ ${file.content.replaceAll("</", "<\\/")}
 - Do not call write_to_file, replace_file_content, multi_replace_file_content, or run_command.
 - Inspect the workspace only with grep_search, view_file, and list_dir. Headless read-only runs cannot
   approve the "command" permission, so any run_command call is auto-denied and aborts the analysis
-  with no output (observed in a real front-end review, OficinaAI 2026-09-22).`
+  with no output.`
     : `- You are an agentic coding assistant. Complete the task fully using your available tools.
 - Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
 - Use grep_search, view_file, and list_dir to explore and search the workspace.

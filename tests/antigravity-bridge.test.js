@@ -11,7 +11,9 @@ import {
   buildAntigravityArgs,
   appendRunJournal,
   buildAntigravityPrompt,
+  buildDesignSystemBlock,
   buildImagePrompt,
+  DESIGN_SYSTEM_CORE_FILES,
   checkAgyConnectivity,
   classifyAgyOutput,
   collectContextFiles,
@@ -1574,7 +1576,6 @@ async function makeDesignPackage(root, { tokensBytes = 40_000 } = {}) {
   );
   await fs.writeFile(path.join(root, "DESIGN.md"), "# Design\n");
   await fs.writeFile(path.join(root, "components.html"), "<button class=\"btn\">ok</button>\n");
-  await fs.writeFile(path.join(root, "components.css"), ".btn{background:var(--accent);}\n");
   await fs.writeFile(path.join(root, "preview", "colors.html"), "<p>colors</p>\n");
   await fs.writeFile(path.join(root, "system", "kit.html"), "<p>kit</p>\n");
 }
@@ -1601,7 +1602,6 @@ test("collectDesignSystemContext inlines core files in full and lists the rest o
   assert.deepEqual(context.included.map((f) => f.path), [
     `${root}/DESIGN.md`,
     `${root}/tokens.css`,
-    `${root}/components.css`,
     `${root}/components.html`,
   ]);
   const tokens = context.included.find((f) => f.path.endsWith("tokens.css"));
@@ -1630,6 +1630,23 @@ test("collectDesignSystemContext prefers the resolved/ package and names it afte
   assert.equal(context.packages[0].id, "bmw");
   assert.equal(context.packages[0].root, "bmw/resolved");
   assert.deepEqual(context.included.map((f) => f.path), ["bmw/resolved/design-contract.json"]);
+});
+
+// The bridge is transport: it inlines the package files it is given and states their authority.
+// Workflow policy of a specific producer (which stylesheet to import, which scaffolding classes to
+// avoid, which run motivated a rule) belongs in the caller's task prompt, never in this block.
+test("the design_system block carries no producer-specific workflow rule", () => {
+  const block = buildDesignSystemBlock([{ id: "acme", root: "ds/acme", coreFiles: ["ds/acme/tokens.css"], onDemandCount: 1 }]);
+  assert.doesNotMatch(block, /components\.css|\.grid|scaffolding|import .* stylesheet/i);
+  assert.doesNotMatch(block, /OficinaAI|Pensador|Orquestrador|Orchestrador/i);
+  assert.deepEqual([...DESIGN_SYSTEM_CORE_FILES], [
+    "design-contract.json", "DESIGN.md", "tokens.css", "components.html", "USAGE.md", "components.manifest.json", "assets/manifest.json",
+  ]);
+});
+
+test("the read-only prompt names no consumer project", () => {
+  const prompt = buildAntigravityPrompt({ task: "Analyze", context: { included: [], skipped: [] }, readOnly: true });
+  assert.doesNotMatch(prompt, /OficinaAI|Pensador|Orquestrador|Orchestrador/i);
 });
 
 test("collectDesignSystemContext rejects a directory that is not an Open Design package", async () => {
