@@ -125,13 +125,14 @@ test("main --print-command resolves model aliases and forwards modern flags", as
     "--model", "gemini 3.7 flash",
     "--effort", "high",
     "--agent", "code-reviewer",
-    "--json-schema", "schema.json",
+    "--json-schema", '{"type":"object","properties":{"ok":{"type":"boolean"}}}',
     "review",
   ]);
   assert.match(io.stdout, /--model" "gemini-3\.7-flash-high/);
   assert.match(io.stdout, /--effort" "high/);
   assert.match(io.stdout, /--agent" "code-reviewer/);
-  assert.match(io.stdout, /--json-schema" "schema\.json/);
+  assert.match(io.stdout, /--json-schema/);
+  assert.match(io.stdout, /properties/);
 });
 
 test("main --dump-prompt writes the effective prompt and an undegraded audit sidecar", async () => {
@@ -594,4 +595,85 @@ test("bridge.exit fires on the classification path too, with the classified type
     else process.env.CC_ANTIGRAVITY_LOG_PATH = previousEnv;
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test("main rejects a bad schema before model discovery or any process spawn", async () => {
+  const asyncCalls = [];
+  const syncCalls = [];
+  const { exitCode, io } = await runMain(["--json-schema", '{"type":"string"}', "task"], {
+    asyncCalls, syncCalls,
+    _resolveModelCatalog: () => { throw new Error("catalog must not run"); },
+  });
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stderr, /root must have/);
+  assert.equal(asyncCalls.length + syncCalls.length, 0);
+});
+
+test("main forwards a base model without injecting an effort", async () => {
+  const { exitCode, asyncCalls } = await runMain(["--model", "gemini-3.8-flash", "task"], {
+    _spawnSync: (command) => ({ status: 0, stdout: command === "which" || command === "where" ? "agy\n" : "1.4.0\n" }),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(asyncCalls[0].args[asyncCalls[0].args.indexOf("--model") + 1], "gemini-3.8-flash");
+  assert.ok(!asyncCalls[0].args.includes("--effort"));
+});
+
+test("main maps AGY_ERROR from stderr even with a partial JSON response", async () => {
+  const upstream = { status: "UNAVAILABLE", code: 503, retryable: true, error_id: "error-123", message: "service unavailable" };
+  for (const format of ["json", "stream-json", "text"]) {
+    const envelope = { conversation_id: "conv-partial", status: "ERROR", response: "partial response", error: "agent failed", usage: { total_tokens: 5 } };
+    const stdout = format === "json" ? JSON.stringify(envelope)
+      : format === "stream-json" ? JSON.stringify({ event: "result", result: envelope }) + "\n"
+      : "partial response\n";
+    const { exitCode, io } = await runMain(["--format", format, "task"], {
+      spawnResult: { stdout, stderr: `AGY_ERROR: ${JSON.stringify(upstream)}\n`, exitCode: 3 },
+    });
+    assert.equal(exitCode, EXIT_ERROR);
+    const signal = JSON.parse(io.stdout.trim().split("\n").at(-1));
+    assert.equal(signal.status, "AGY_ERROR");
+    assert.deepEqual(signal.agy_error, upstream);
+    if (format !== "text") {
+      assert.equal(signal.response, "partial response");
+      assert.equal(signal.conversation_id, "conv-partial");
+      assert.equal(signal.usage.total_tokens, 5);
+    }
+  }
+});
+
+test("main guards Auto mode against an older CLI before starting a task", { skip: process.platform === "win32" }, async () => {
+  const { exitCode, io, asyncCalls } = await runMain(["--mode", "auto", "task"]);
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stderr, /requires AGY 1.3.5/);
+  assert.equal(asyncCalls.length, 0);
+});
+
+test("main runs Auto mode on a supported CLI without permission bypass", { skip: process.platform === "win32" }, async () => {
+  const { exitCode, asyncCalls } = await runMain(["--mode", "auto", "task"], {
+    _spawnSync: (command, args) => ({ status: 0, stdout: command === "which" ? "agy\n" : "1.4.0\n" }),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.ok(!asyncCalls[0].args.includes("--dangerously-skip-permissions"));
+  assert.equal(asyncCalls[0].args[asyncCalls[0].args.indexOf("--mode") + 1], "auto");
+});
+
+test("main refreshes a stale catalog once for a newly requested model generation", async () => {
+  const queries = [];
+  const { exitCode, asyncCalls } = await runMain(["--model", "claude sonnet 5.5", "task"], {
+    _resolveModelCatalog: async (options) => {
+      queries.push(options);
+      return queries.length === 1 ? FALLBACK_MODEL_CATALOG
+        : [...FALLBACK_MODEL_CATALOG, { slug: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" }];
+    },
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(queries.length, 2);
+  assert.equal(queries[1].ttlMs, 0);
+  assert.equal(asyncCalls[0].args[asyncCalls[0].args.indexOf("--model") + 1], "claude-sonnet-5-5");
+});
+
+test("main reports the minimum CLI version for base slugs before starting a task", async () => {
+  const { exitCode, io, asyncCalls } = await runMain(["--model", "gemini-3.8-flash", "task"]);
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stderr, /require AGY 1.3.4/);
+  assert.equal(asyncCalls.length, 0);
 });

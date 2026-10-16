@@ -33,7 +33,7 @@ export function buildPolicyContext() {
     "- Large front-end work: pass --parallel to fan out independent components/screens.",
     "- Model guidance: omit --model unless the user requests one, preserving their AGY /model;",
     "  generic Flash -> --model gemini-3.8-flash-high (runtime aliases track the newest catalog);",
-    "  Claude review -> --model claude-sonnet-4-6; maximum Claude -> --model claude-opus-4-6-thinking.",
+    "  Claude review -> --model sonnet; maximum Claude -> --model opus (runtime catalog).",
     "- Headless tasks use JSON and disable slash-command expansion by default. Use --format stream-json",
     "  for live tool/subagent progress, --effort only when explicitly requested, and --agent <name>",
     "  for custom agents. --interactive is exclusively the PTY mode.",

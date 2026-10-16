@@ -41,6 +41,37 @@ Claude can call `agy` directly via Bash (`agy --print "task" --dangerously-skip-
 
 **Summary:** for automated workflows, skills, and coding tasks where consistent agentic behavior is required, the bridge is the right choice. For simple ad-hoc invocations, raw `agy` suffices.
 
+## AGY CLI 1.4 support (plugin 4.6.0)
+
+- `--mode auto` enables AGY's command review on Linux/macOS (AGY 1.3.5+). It
+  disables the plugin's default permission bypass and conflicts with `--skip-permissions`.
+  Headless runs cannot answer approval prompts; use `--interactive` for manual review.
+- `--effort` also accepts `xhigh` and `max` when the selected model supports them.
+- Exact base model slugs such as `--model gemini-3.8-flash` preserve AGY's default
+  effort (AGY 1.3.4+). Generic `--model opus` / `--model sonnet` follow the runtime
+  catalog, including Claude 5.5 when available to your account and authentication.
+  A missing requested generation triggers one catalog refresh and never silently
+  downgrades to an earlier generation.
+- `--json-schema` requires JSON with an object root (`"type": "object"`), inline
+  or in a file. Invalid inputs fail before model discovery or task execution.
+- Structured `AGY_ERROR` diagnostics on stderr are normalized across text, JSON,
+  and stream-json. Quota/auth/timeout map to 10/11/12; other structured failures
+  map to 1 with upstream metadata in `agy_error` and any structured partial `response`.
+  A partial response is never a successful result when the CLI reports an error.
+- Workspace prompts use available search tools such as `code_search`; legacy
+  `grep_search`, `find_by_name`, and `list_dir` are no longer assumed to be loaded.
+
+The bridge keeps its explicit 10-minute timeout unless overridden (the plugin's
+configured `timeout` also applies). AGY 1.2.6+ itself defaults to unlimited.
+AGY 1.3.2+ permission bypass no longer auto-approves plan artifacts; configure
+Artifact Review in AGY if needed. Native terminal shortcuts, Remote Control,
+OSC 7501 status, and AGY marketplace management remain native CLI features.
+`agy plugin validate --strict --json` validates **AGY** plugins; this repository
+continues to use the Claude Code plugin manifest.
+
+Sources: [AGY releases](https://github.com/google-antigravity/antigravity-cli/releases),
+[effort reference](https://antigravity.google/docs/cli/commands/effort/).
+
 ## Version 4.0 migration
 
 Version 4.0 targets AGY 1.1.8+ and realigns bridge flags with the CLI:
@@ -55,8 +86,8 @@ Version 4.0 targets AGY 1.1.8+ and realigns bridge flags with the CLI:
 
 ## Prerequisites
 
-- **Node.js 18+**
-- **Antigravity CLI 1.1.8+** installed and authenticated (AGY 1.1.16 recommended)
+- **Node.js 22+**
+- **Antigravity CLI 1.1.8+** installed and authenticated (AGY 1.4.0 recommended)
 
 ```bash
 # macOS / Linux
@@ -193,14 +224,14 @@ $antigravity-integration <task>
 | `--add-dir <path>` | Add directory to AGY's native workspace via `--add-dir`; repeatable |
 | `--model <name>` | Native AGY slug or alias resolved from `agy models`; omitted by default to preserve the user's AGY `/model` |
 | `--format <format>` | `text`, `json`, or `stream-json`; JSON is the headless default |
-| `--effort <level>` | Native `low`, `medium`, or `high`; forwarded only when requested |
-| `--mode <mode>` | Native `plan` or `accept-edits` |
+| `--effort <level>` | Native `low`, `medium`, `high`, `xhigh`, or `max` (model-dependent); forwarded only when requested |
+| `--mode <mode>` | Native `plan`, `accept-edits`, or `auto` (AGY 1.3.5+, Linux/macOS); Auto mode disables permission bypass |
 | `--agent <name>` | Select a custom AGY agent; no longer aliases interactive mode |
-| `--json-schema <value>` | Schema string/path; implies JSON output |
+| `--json-schema <value>` | Object-root JSON Schema string/file; validated before AGY starts; implies JSON output |
 | `--allow-slash-commands` | Re-enable slash-command expansion (disabled by default headless) |
 | `--parallel` | Allow AGY to split the task among multiple native Gemini subagents (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). AGY decides how many. Works in default headless mode. |
 | `--subagent-model <name>` | Model for spawned subagents (passed via prompt — AGY has no per-subagent CLI flag). Enables `--parallel` automatically. Default: model of main session. |
-| `--read-only` | Forces native `--mode plan`, disables skip-permissions/cwd auto-add, and keeps slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. The prompt restricts inspection to `grep_search`/`view_file`/`list_dir`: headless runs cannot approve the `command` permission, so a `run_command` call is auto-denied and aborts the analysis (4.4.3) |
+| `--read-only` | Forces native `--mode plan`, disables skip-permissions/cwd auto-add, and keeps slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. The prompt restricts inspection to available read-only search tools such as `code_search` and `view_file`: headless runs cannot approve the `command` permission, so a `run_command` call is auto-denied and aborts the analysis (4.4.3) |
 | `--continue`, `-c` | Resume the most recent AGY conversation |
 | `--conversation <id>` | Resume a specific AGY conversation by ID |
 | `--timeout <duration>` | Pass `--print-timeout` to AGY (e.g., `3m`, `300s`). Timer resets per output chunk. |

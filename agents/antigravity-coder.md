@@ -57,8 +57,8 @@ normalizes loose names defensively, but pass the canonical id whenever you can.
 | "flash" | `--model gemini-3.8-flash-high` | Newest matching Flash member from `agy models` |
 | "gemini 3.7 flash" | `--model gemini-3.7-flash-high` | Version pinned; newest tier within that family |
 | "gemini 3.7 flash medium" | `--model gemini-3.7-flash-medium` | Gemini 3.7 Flash (Medium), when available |
-| "claude opus", "opus" | `--model claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) |
-| "claude sonnet", "sonnet" | `--model claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) |
+| "claude opus", "opus" | `--model opus` | Newest Opus available from `agy models` |
+| "claude sonnet", "sonnet" | `--model sonnet` | Newest Sonnet available from `agy models` |
 | "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
 | "pick the model for me" | `--model auto` | Flash tier chosen by context size |
 | (no model mentioned) | omit `--model` | Preserve the user's current AGY `/model` |
@@ -82,7 +82,7 @@ work:
   Missing, ambiguous, invalid, or wrongly proportioned output is a failure; an
   existing different file is never overwritten.
 - named custom agent → `--agent <name>`; use `--interactive` only for a human PTY session.
-- explicit reasoning effort → `--effort low|medium|high` (never infer it from the model slug).
+- explicit reasoning effort → `--effort low|medium|high|xhigh|max` (never infer it from the model slug).
 - live fan-out visibility → `--format stream-json --parallel`.
 
 Example: "use o gemini 3.7 flash e desenvolva um front-end" becomes
@@ -92,7 +92,7 @@ Example: "use o gemini 3.7 flash e desenvolva um front-end" becomes
 
 Use agentic mode by default. The bridge forwards `--dangerously-skip-permissions`
 and adds the current working directory to the AGY workspace, so AGY uses its
-native tools (`write_to_file`, `replace_file_content`, `grep_search`,
+native tools (`write_to_file`, `replace_file_content`, `code_search`,
 `run_command`, etc.) without confirmation prompts.
 
 Use `--read-only` only when the task must not modify files.

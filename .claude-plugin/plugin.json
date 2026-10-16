@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "4.4.3",
+    "version": "4.6.0",
     "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Use the command/skill path or the antigravity-coder subagent for implementation; the bundled antigravity-agent is read-only analysis only.",
     "author": {
         "name": "Allan Harlen",
@@ -34,7 +34,7 @@
     "requiresExternalTool": {
         "name": "agy",
         "installUrl": "https://antigravity.google/cli/install.sh",
-        "description": "Antigravity CLI (AGY) 1.1.8+ — Google's long-context agentic coding terminal"
+        "description": "Antigravity CLI (AGY) 1.1.8+ (1.4.0 recommended) — Google's long-context agentic coding terminal"
     },
     "userConfig": {
         "default_model": {
@@ -46,7 +46,7 @@
         "default_effort": {
             "type": "string",
             "title": "Default AGY Reasoning Effort",
-            "description": "Optional native reasoning effort: low, medium, or high. Leave blank to let AGY/model defaults decide.",
+            "description": "Optional native reasoning effort: low, medium, high, xhigh, or max (model-dependent). Leave blank to let AGY/model defaults decide.",
             "default": ""
         },
         "timeout": {
