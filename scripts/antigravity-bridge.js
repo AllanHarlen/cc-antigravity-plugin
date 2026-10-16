@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import process from "node:process";
 import { createHash, randomUUID } from "node:crypto";
 import { resolveDefaultLogPath, logEvent } from "./utils.js";
+import { compareVersions } from "./check-agy.js";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
@@ -32,8 +33,8 @@ export const DESIGN_SYSTEM_CORE_FILES = [
 ];
 const DESIGN_SYSTEM_MAX_FILE_BYTES = 262_144;
 const SUPPORTED_FORMATS = new Set(["text", "json", "stream-json"]);
-const SUPPORTED_EFFORTS = new Set(["low", "medium", "high"]);
-const SUPPORTED_MODES = new Set(["plan", "accept-edits"]);
+const SUPPORTED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const SUPPORTED_MODES = new Set(["plan", "accept-edits", "auto"]);
 const MODEL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const KNOWN_BINARY_EXTENSIONS = new Set([
   ".7z",
@@ -141,6 +142,9 @@ const QUOTA_PATTERNS = [
 ];
 
 const AUTH_PATTERNS = [
+  /\bUNAUTHENTICATED\b/i,
+  /authentication expired/i,
+  /please log back in/i,
   /not authenticated/i,
   /authentication.*required/i,
   /please.{0,20}sign.?in/i,
@@ -176,9 +180,12 @@ Options:
   --model <name>             Model slug or natural-language alias. Resolved dynamically from \`agy models\`.
                              Omitted when not requested so AGY honors the user's own /model setting.
                              Use \`auto\` to select a tier from the newest available Flash family.
-  --effort <level>           Reasoning effort: low, medium, or high.
-  --mode <mode>              Permission mode: plan or accept-edits.
-  --json-schema <value>      JSON Schema string or path. Implies --format json.
+  --effort <level>           Reasoning effort: low, medium, high, xhigh, or max (model-dependent).
+  --mode <mode>              Permission mode: plan, accept-edits, or auto.
+                             auto requires AGY 1.3.5+ on Linux/macOS, disables the default
+                             permission bypass, and conflicts with --skip-permissions.
+  --json-schema <value>      JSON Schema string or file path; root must have type object.
+                             Implies --format json; invalid schemas fail before spawning AGY.
   --disable-slash-commands   Treat task text as data (default headless, except --read-only;
                              AGY 1.1.16 otherwise ignores --mode plan). Passing it explicitly
                              with --read-only is honored (task text stays data instead of
@@ -397,8 +404,43 @@ export function parseAgyJsonResult(stdout) {
   };
 }
 
-// Classifies structured JSON envelopes first (scanning only their status/error
-// fields, never the response body, so a successful task that legitimately talks
+// AGY 1.2.14+ accepts only an object-root JSON Schema. Resolve files here so
+// bad inputs fail before model discovery/authentication, including --print-command.
+export function resolveJsonSchema(value, cwd = process.cwd()) {
+  if (value === undefined) return undefined;
+  let schema;
+  const source = String(value).trim();
+  const inline = source.startsWith("{") || source.startsWith("[");
+  const schemaPath = inline ? undefined : path.resolve(cwd, source);
+  try {
+    schema = JSON.parse(inline ? source : fs.readFileSync(schemaPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Invalid --json-schema: provide JSON or a readable schema file (${error.message}).`);
+  }
+  if (!schema || Array.isArray(schema) || schema.type !== "object") {
+    throw new Error('Invalid --json-schema: the root must have "type": "object".');
+  }
+  // Preserve file transport: inlining a large schema would hit OS argv limits.
+  return schemaPath ?? JSON.stringify(schema);
+}
+
+// Parse only AGY's stderr diagnostic channel, never a response that happens to
+// discuss an error. A malformed diagnostic falls back to the legacy classifier.
+export function parseAgyError(stderr) {
+  let diagnostic;
+  for (const line of String(stderr ?? "").split(/\r?\n/)) {
+    const match = line.match(/^\s*AGY_ERROR:\s*(\{.*\})\s*$/);
+    if (!match) continue;
+    try {
+      const value = JSON.parse(match[1]);
+      if (value && typeof value === "object" && !Array.isArray(value)) diagnostic = value;
+    } catch { /* Legacy text classification still applies. */ }
+  }
+  return diagnostic;
+}
+
+// Classifies structured stderr diagnostics, then JSON envelopes (scanning only
+// status/error fields, never the response body, so a successful task that talks
 // about rate limits or 401s is never misclassified). When there is no envelope —
 // a raw-text caller, or a failed/empty JSON parse upstream — text scanning kicks
 // in, gated by the process's own exit code: a clean exit (0) is never scanned,
@@ -406,8 +448,35 @@ export function parseAgyJsonResult(stdout) {
 // being a failure of this call to AGY. When the exit code is unknown and the
 // caller didn't ask for text-format scanning, this preserves the old
 // conservative default of not classifying at all.
-export function classifyAgyOutput(output, { format = "text", exitCode } = {}) {
+export function classifyAgyOutput(output, { format = "text", exitCode, stderr = "" } = {}) {
   const envelope = output && typeof output === "object" ? output : null;
+  const failed = exitCode != null ? Number(exitCode) !== 0
+    : envelope && String(envelope.status).toUpperCase() !== "SUCCESS";
+  const agyError = failed ? parseAgyError(stderr) : null;
+  if (agyError) {
+    const status = String(agyError.status ?? "").toUpperCase();
+    const code = String(agyError.code ?? "").toUpperCase();
+    const reason = String(agyError.message ?? envelope?.error ?? status);
+    let type = "AGY_ERROR";
+    let mappedExit = EXIT_ERROR;
+    if ([status, code].some((s) => ["RESOURCE_EXHAUSTED", "QUOTA_EXHAUSTED", "429", "8"].includes(s))) {
+      type = "QUOTA_EXHAUSTED";
+      mappedExit = EXIT_QUOTA_EXAUSTED;
+    } else if ([status, code].some((s) => ["UNAUTHENTICATED", "AUTH_REQUIRED", "401", "16"].includes(s))) {
+      type = "AUTH_REQUIRED";
+      mappedExit = EXIT_AUTH_REQUIRED;
+    } else if ([status, code].some((s) => ["DEADLINE_EXCEEDED", "TIMEOUT", "504", "4"].includes(s))) {
+      type = "TIMEOUT";
+      mappedExit = EXIT_TIMEOUT;
+    } else if (QUOTA_PATTERNS.some((p) => p.test(reason))) {
+      type = "QUOTA_EXHAUSTED";
+      mappedExit = EXIT_QUOTA_EXHAUSTED;
+    } else if (AUTH_PATTERNS.some((p) => p.test(reason))) {
+      type = "AUTH_REQUIRED";
+      mappedExit = EXIT_AUTH_REQUIRED;
+    }
+    return { type, reason, exitCode: mappedExit, agyError };
+  }
   const diagnostic = envelope
     ? `${envelope.status ?? ""}\n${envelope.error ?? ""}`
     : String(output ?? "");
@@ -432,10 +501,14 @@ export function classifyAgyOutput(output, { format = "text", exitCode } = {}) {
 
 // Emits a single machine-readable JSON line that orchestrators / Claude Code can parse.
 // Quota signals include the exact conversation when AGY returned one.
-function emitStructuredSignal(type, reason, model, result, _stdout) {
+function emitStructuredSignal(type, reason, model, result, _stdout, agyError) {
   const signal = { status: type, reason, model };
   if (result?.conversationId) signal.conversation_id = result.conversationId;
   if (result?.usage) signal.usage = result.usage;
+  if (agyError) {
+    signal.agy_error = agyError;
+    if (result?.response) signal.response = result.response;
+  }
   if (type === "QUOTA_EXAUSTED") {
     signal.retry = result?.conversationId
       ? `--conversation ${result.conversationId}`
@@ -444,7 +517,7 @@ function emitStructuredSignal(type, reason, model, result, _stdout) {
   _stdout.write(JSON.stringify(signal) + "\n");
 }
 
-export function parseCliArgs(argv) {
+export function parseCliArgs(argv, { platform = process.platform } = {}) {
   const parsed = {
     dirs: [],
     addDirs: [],
@@ -721,6 +794,15 @@ export function parseCliArgs(argv) {
     }
   }
   if (parsed.jsonSchema) parsed.format = "json";
+  if (parsed.mode === "auto") {
+    if (sawSkipPermissionsFlag) {
+      throw new Error("--mode auto cannot be combined with --skip-permissions: it bypasses Auto mode's command review.");
+    }
+    if (platform === "win32") {
+      throw new Error("--mode auto requires Linux or macOS; AGY 1.4.0 does not support Auto mode on Windows.");
+    }
+    parsed.skipPermissions = false;
+  }
 
   if (!parsed.help && !parsed.task && parsed.agent) {
     throw new Error(
@@ -1113,12 +1195,14 @@ ${file.content.replaceAll("</", "<\\/")}
   const executionConstraints = readOnly
     ? `- You are a read-only analysis assistant. Analyze, inspect, and report without modifying files.
 - Do not call write_to_file, replace_file_content, multi_replace_file_content, or run_command.
-- Inspect the workspace only with grep_search, view_file, and list_dir. Headless read-only runs cannot
+- Inspect the workspace only with available read-only search tools (such as code_search) and view_file.
+  Do not assume legacy grep_search, find_by_name, or list_dir tools are loaded. Headless read-only runs cannot
   approve the "command" permission, so any run_command call is auto-denied and aborts the analysis
   with no output.`
     : `- You are an agentic coding assistant. Complete the task fully using your available tools.
 - Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
-- Use grep_search, view_file, and list_dir to explore and search the workspace.
+- Use available search tools (such as code_search) and view_file to explore the workspace.
+- Do not assume legacy grep_search, find_by_name, or list_dir tools are loaded; use them only if available.
 - Use run_command to execute shell commands when needed.`;
   const completionConstraint = readOnly
     ? "- Complete the entire analysis without stopping mid-way. Report findings and cited paths at the end."
@@ -1222,6 +1306,9 @@ export function buildAntigravityArgs({
   useStdin = false,
 } = {}) {
   const args = [];
+  if (mode === "auto" && skipPermissions) {
+    throw new Error("--mode auto cannot bypass permissions; omit --skip-permissions.");
+  }
   if (continueConversation) args.push("--continue");
   if (conversationId) args.push("--conversation", conversationId);
   for (const dir of addDirs) {
@@ -1242,12 +1329,8 @@ export function buildAntigravityArgs({
     if (!useStdin && prompt !== undefined) {
       args.push("--print", prompt);
     }
-    // Sempre explicito: sem isso, agy usa seu proprio default de 5 min quando
-    // `--timeout` nao e informado, silenciosamente mais curto que o
-    // CONPTY_TIMEOUT_MS de 10 min do bridge. Numa run real, 7 de 9 dispatches
-    // sem `--timeout` morreram aos ~5m05s gravando `bytes: 0` e exit de
-    // sucesso — nenhum `bridge.classified`/`bridge.error` no log, porque o
-    // bridge nunca soube que havia um timeout em jogo (Achado 7).
+    // Keep the bridge's explicit 10-minute budget across CLI versions: AGY
+    // 1.2.6 changed the native default from five minutes to unlimited (0).
     args.push("--print-timeout", timeout || `${CONPTY_TIMEOUT_MS}ms`);
   }
   return args;
@@ -1397,7 +1480,7 @@ function compareModelsNewestFirst(left, right) {
   const [rightMajor, rightMinor] = modelVersion(right.slug);
   if (leftMajor !== rightMajor) return rightMajor - leftMajor;
   if (leftMinor !== rightMinor) return rightMinor - leftMinor;
-  const tierRank = (slug) => slug.endsWith("-high") ? 3 : slug.endsWith("-medium") ? 2 : slug.endsWith("-low") ? 1 : 0;
+  const tierRank = (slug) => ["low", "medium", "high", "xhigh", "max"].indexOf(slug.split("-").at(-1)) + 1;
   return tierRank(right.slug) - tierRank(left.slug) || left.slug.localeCompare(right.slug);
 }
 
@@ -1498,9 +1581,11 @@ function familyCandidates(normalized, catalog) {
       const version = modelVersion(slug);
       return version[0] === major && version[1] === minor;
     });
-    if (sameVersion.length > 0) candidates = sameVersion;
+    // A requested generation must not silently downgrade when a cached catalog
+    // predates its launch (or the signed-in account cannot access it).
+    candidates = sameVersion;
   }
-  const requestedTier = ["high", "medium", "low"].find((tier) => normalized.includes(tier));
+  const requestedTier = normalized.match(/(?:^|-)(max|xhigh|high|medium|low)$/)?.[1];
   if (requestedTier) {
     const sameTier = candidates.filter(({ slug }) => slug.endsWith(`-${requestedTier}`));
     if (sameTier.length > 0) candidates = sameTier;
@@ -1518,13 +1603,19 @@ export function resolveModelAlias(raw, catalog = FALLBACK_MODEL_CATALOG) {
     ({ slug, label }) => normalizeModelToken(slug) === norm || normalizeModelToken(label) === norm,
   );
   if (direct) return direct.slug;
+  // AGY 1.3.4+ accepts a base model and chooses its default effort. Preserve
+  // that exact base instead of silently selecting the highest available tier.
+  const base = catalog.map(({ slug }) => slug.replace(/-(?:low|medium|high|xhigh|max)$/, ""))
+    .find((slug) => slug === String(raw).trim().toLowerCase());
+  if (base) return base;
   const [familyMatch] = familyCandidates(norm, catalog);
   if (familyMatch) return familyMatch.slug;
   return raw;
 }
 
 export function isKnownModel(model, catalog = FALLBACK_MODEL_CATALOG) {
-  return model === "auto" || catalog.some(({ slug }) => slug === model);
+  return model === "auto" || catalog.some(({ slug }) => slug === model
+    || slug.replace(/-(?:low|medium|high|xhigh|max)$/, "") === model);
 }
 
 // Selects a tier from the newest available Flash family when --model auto is requested.
@@ -1577,6 +1668,7 @@ export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
     }
     throw err;
   }
+  return version;
 }
 
 // A plain `child.kill()`/`term.kill()` sends SIGTERM only to the direct child.
@@ -2397,13 +2489,22 @@ async function mainImpl(argv = process.argv.slice(2), {
       logEvent("bridge.help", {});
       return EXIT_SUCCESS;
     }
+    const jsonSchema = resolveJsonSchema(parsed.jsonSchema);
 
     const configuredModel = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL?.trim() || undefined;
     const modelInput = parsed.model ?? configuredModel;
     const needsCatalog = Boolean(modelInput || parsed.subagentModel);
-    const modelCatalog = needsCatalog
+    let modelCatalog = needsCatalog
       ? await _resolveModelCatalog({ _spawnSync })
       : FALLBACK_MODEL_CATALOG;
+    const missingVersionedModel = [modelInput, parsed.subagentModel].some((input) =>
+      input && /\d+[.-]\d+/.test(input)
+      && !isKnownModel(resolveModelAlias(input, modelCatalog), modelCatalog));
+    if (missingVersionedModel) {
+      // A just-launched model can be absent from the otherwise-fresh 24h cache.
+      // Retry discovery once; if still unavailable, the existing warning applies.
+      modelCatalog = await _resolveModelCatalog({ _spawnSync, ttlMs: 0 });
+    }
     let model = modelInput ? resolveModelAlias(modelInput, modelCatalog) : undefined;
     const modelSource = parsed.model ? "flag" : configuredModel ? "config" : "agy-default";
     if (modelInput && model !== modelInput) {
@@ -2567,7 +2668,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     let configuredEffort = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_EFFORT?.trim() || undefined;
     if (configuredEffort && !SUPPORTED_EFFORTS.has(configuredEffort)) {
       _stderr.write(
-        `Warning: unsupported configured effort "${configuredEffort}"; expected low, medium, or high. ` +
+        `Warning: unsupported configured effort "${configuredEffort}"; expected ${[...SUPPORTED_EFFORTS].join(", ")}. ` +
           "AGY will use its own effort default.\n",
       );
       configuredEffort = undefined;
@@ -2580,7 +2681,7 @@ async function mainImpl(argv = process.argv.slice(2), {
       effort: parsed.effort ?? configuredEffort,
       mode: parsed.mode,
       agent: parsed.agent,
-      jsonSchema: parsed.jsonSchema,
+      jsonSchema,
       disableSlashCommands: parsed.disableSlashCommands,
       timeout,
       interactive: parsed.interactive && !imageHeadless,
@@ -2606,7 +2707,14 @@ async function mainImpl(argv = process.argv.slice(2), {
     }
 
     const agyExe = resolveAgyExe(_spawnSync);
-    checkAgyConnectivity(agyExe, _spawnSync);
+    const agyVersion = checkAgyConnectivity(agyExe, _spawnSync);
+    if (parsed.mode === "auto" && compareVersions(agyVersion, "1.3.5") < 0) {
+      throw new Error("--mode auto requires AGY 1.3.5 or newer. Run `agy update`.");
+    }
+    if (model && !modelCatalog.some(({ slug }) => slug === model)
+      && compareVersions(agyVersion, "1.3.4") < 0) {
+      throw new Error("Base --model slugs require AGY 1.3.4 or newer. Run `agy update` or select an explicit effort variant.");
+    }
 
     const spawnStartMs = Date.now();
 
@@ -2770,7 +2878,7 @@ async function mainImpl(argv = process.argv.slice(2), {
 
     const classification = classifyAgyOutput(
       result ?? `${headless.stdout}\n${headless.stderr}`,
-      { format: parsed.format, exitCode: headless.exitCode },
+      { format: parsed.format, exitCode: headless.exitCode, stderr: headless.stderr },
     );
     if (!classification && parseError) {
       throw parseError;
@@ -2778,7 +2886,7 @@ async function mainImpl(argv = process.argv.slice(2), {
     if (classification) {
       _diag.classified = classification.type;
       _diag.conversationId = result?.conversationId ?? null;
-      emitStructuredSignal(classification.type, classification.reason, model, result, _stdout);
+      emitStructuredSignal(classification.type, classification.reason, model, result, _stdout, classification.agyError);
       logEvent("bridge.classified", {
         type: classification.type,
         reason: classification.reason,

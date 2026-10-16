@@ -1,14 +1,14 @@
 ---
 description: Invoke the Antigravity (AGY) bridge directly as the canonical agentic coding path; creates, edits, and searches files using AGY's native tools
 allowed-tools: Bash(node *antigravity-bridge.js*), Glob, Read
-argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high] [--mode plan|accept-edits] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--design-system dir,...] [--read-only] [--interactive] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high|xhigh|max] [--mode plan|accept-edits|auto] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--design-system dir,...] [--read-only] [--interactive] [--continue] [--conversation id] [--timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
 
 Runs an Antigravity CLI (AGY) agentic session to complete coding tasks. AGY receives
 the task and uses its native tools (`write_to_file`, `replace_file_content`,
-`grep_search`, `run_command`, etc.) to complete the work autonomously.
+available search tools such as `code_search`, `view_file`, `run_command`, etc.) to complete the work autonomously.
 
 Use this command directly for any task that creates, edits, deletes, moves, or
 formats files. Do not route coding work through `antigravity-agent`; that agent is
@@ -33,10 +33,10 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 |----------|-------------|---------|
 | `--model <name>` | Native AGY model slug or alias. The bridge discovers `agy models` with a 24-hour cache; omit it to preserve the user's AGY `/model`. | `--model gemini-3.8-flash-high` |
 | `--format <format>` | Headless output: `text`, `json`, or `stream-json` (default: `json`). Stream progress is written to stderr and only the final result to stdout. | `--format stream-json` |
-| `--effort <level>` | Native reasoning effort: `low`, `medium`, or `high`. Only forwarded when explicitly requested. | `--effort high` |
-| `--mode <mode>` | Native permission mode: `plan` or `accept-edits`. | `--mode plan` |
+| `--effort <level>` | Native reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max` (model-dependent). Only forwarded when explicitly requested. | `--effort high` |
+| `--mode <mode>` | Native permission mode: `plan`, `accept-edits`, or `auto` (AGY 1.3.5+, Linux/macOS; no permission bypass). | `--mode plan` |
 | `--agent <name>` | Select a custom AGY agent; this is not an interactive-mode alias. | `--agent code-reviewer` |
-| `--json-schema <value>` | Schema string or path for structured output; implies `--format json`. | `--json-schema schema.json` |
+| `--json-schema <value>` | Object-root JSON Schema string or file; validated before AGY starts; implies `--format json`. | `--json-schema schema.json` |
 | `--allow-slash-commands` | Re-enable slash-command/skill expansion. Headless prompts disable it by default so task text is data. | `--allow-slash-commands` |
 | `--generate-image` | Ask AGY to use its `generate_imagem` tool. Image generation does not select a synthetic model slug. | `--generate-image` |
 | `--parallel` | Allow AGY to fan the task out across multiple native Gemini subagents. AGY decides how many to spawn based on the task's independent subparts. | `--parallel` |
@@ -79,8 +79,8 @@ also normalizes loose names defensively, but pass the canonical id whenever you 
 | "flash" | `--model gemini-3.8-flash-high` | Newest matching Flash member from `agy models` |
 | "gemini 3.7 flash" | `--model gemini-3.7-flash-high` | Version pinned; newest tier within that family |
 | "gemini 3.7 flash medium" | `--model gemini-3.7-flash-medium` | Gemini 3.7 Flash (Medium), when available |
-| "claude opus", "opus" | `--model claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) |
-| "claude sonnet", "sonnet" | `--model claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) |
+| "claude opus", "opus" | `--model opus` | Newest Opus available from `agy models` |
+| "claude sonnet", "sonnet" | `--model sonnet` | Newest Sonnet available from `agy models` |
 | "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
 | "pick the model for me" | `--model auto` | Flash tier chosen by context size |
 | (no model mentioned) | omit `--model` | Preserve the user's current AGY `/model` |
@@ -196,3 +196,25 @@ subagent tools, then aggregates the results and reports each subagent's conversa
 | AGY missing on PATH | macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash`  Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
 | QUOTA_EXAUSTED | Wait for quota reset or use `--continue` to resume with a narrower scope. |
 | Timeout | Increase `--timeout 15m`, reduce the task scope, or split into steps. |
+
+## AGY CLI 1.4 compatibility
+
+- Use AGY 1.4.0 for current behavior. The baseline remains 1.1.8; Auto mode requires
+  1.3.5+ on Linux/macOS. Pass `--mode auto` only when requested. The bridge disables
+  its default permission bypass in Auto mode and rejects `--skip-permissions` with it.
+  Headless runs cannot answer approval prompts; use `--interactive` when review is needed.
+- Pass an exact base slug such as `--model gemini-3.8-flash` on AGY 1.3.4+ to let
+  AGY pick the model's default effort. Omit `--effort` unless explicitly requested.
+  Generic `opus`/`sonnet` aliases follow the authenticated runtime catalog, including
+  Claude 5.5 when available to the account; do not invent unavailable model IDs.
+- Use available search tools such as `code_search` and `view_file`; legacy
+  `grep_search`, `find_by_name`, and `list_dir` are no longer in the default toolset.
+  Read-only tasks must still avoid `run_command` and all writes.
+- Treat a structured `AGY_ERROR` signal as failure even if it contains a partial
+  `response`. The `agy_error` field preserves upstream status, code, retryability,
+  and error ID when supplied. Quota/auth/timeout still map to exits 10/11/12.
+- `--mode plan` no longer auto-approves artifacts just because permission bypass is
+  enabled (AGY 1.3.2+). Configure Artifact Review in AGY when that workflow needs it.
+- Native AGY marketplace commands (`agy plugin list --json` and
+  `agy plugin validate <path> --strict --json`) manage AGY plugins. This repository
+  remains a Claude Code plugin; do not validate its manifest as an AGY plugin.

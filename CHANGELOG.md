@@ -2,6 +2,42 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.6.0] - 2026-10-16 - Compatibilidade com AGY CLI 1.4.0
+
+- Revisadas as releases oficiais até 1.4.0. Base mantida em AGY 1.1.8+, com
+  1.4.0 recomendado; cada recurso novo depende da versão indicada abaixo.
+- `--mode auto` (AGY 1.3.5+, Linux/macOS) desativa o bypass padrão do bridge,
+  rejeita `--skip-permissions` em qualquer ordem e falha antes de iniciar tarefas
+  com CLI antiga ou Windows. `--read-only` continua prevalecendo como modo plan.
+- `--effort` aceita `xhigh` e `max`, inclusive na configuração do plugin; o AGY
+  continua validando quais níveis o modelo selecionado oferece. Aliases distinguem
+  high/xhigh/max e ordenam os novos níveis corretamente.
+- Slugs base exatos presentes nas variantes do catálogo, como
+  `gemini-3.8-flash`, são preservados para o esforço padrão nativo do AGY 1.3.4+.
+  Nomes em linguagem natural mantêm a resolução por família e esforço. Aliases Opus/Sonnet nas
+  instruções passam a acompanhar o catálogo autenticado, sem fixar Claude 4.6.
+  Uma geração explicitamente solicitada e ausente força uma atualização do cache
+  uma vez; nunca é substituída silenciosamente por uma geração anterior.
+- `--json-schema` valida JSON inline ou arquivo existente e exige raiz
+  `"type": "object"` antes de consultar modelos ou iniciar processos. Arquivos
+  permanecem como paths absolutos para não aumentar argv com schemas grandes.
+- `AGY_ERROR: {...}` no stderr (AGY 1.2.6+) é interpretado mesmo com resposta
+  parcial e envelope JSON/stream-json. Cota, autenticação e deadline mapeiam para
+  10/11/12; demais erros estruturados mapeiam para 1. `agy_error` preserva
+  metadados originais e `response` preserva a resposta parcial estruturada.
+- Reconhecida a mensagem nova de autenticação expirada. Respostas de sucesso que
+  discutem erros continuam protegidas contra classificação indevida.
+- Prompts deixam de exigir ferramentas legadas removidas do conjunto padrão no
+  AGY 1.2.7; orientam buscas com ferramentas disponíveis, como `code_search`.
+  Read-only continua proibindo `run_command` e escrita.
+- Mantido o timeout explícito do bridge; documentados o timeout ilimitado nativo,
+  a revisão de artefatos desde 1.3.2 e o limite entre plugins Claude Code e AGY.
+- Versões sincronizadas em package, lockfile e manifests; pré-requisito Node.js
+  corrigido para 22+, conforme engines e CI.
+- Validação: 207 testes aprovados, 1 teste autenticado ignorado; instalação npm e
+  PTY nativa verificadas. Conferência de flags e rejeição de schemas no
+  binário oficial Linux x64 1.4.0. Execução real de modelos requer autenticação.
+
 ## [4.4.3] - 2026-09-25 - `--read-only` headless sem `run_command`
 
 - `--read-only`: o prompt deixa de oferecer `run_command` "somente leitura". Em execucao headless o AGY nega automaticamente a permissao `command`, e a chamada abortava a analise sem saida (observado num review de front-end em `--read-only`, 2026-09-22). A inspecao fica restrita a `grep_search`, `view_file` e `list_dir`.
