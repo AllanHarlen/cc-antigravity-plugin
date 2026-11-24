@@ -39,6 +39,33 @@ tasks with `run_in_background: true` plus `--output-file <path>` and Read the fi
 Pass `--read-only` to force AGY's native `--mode plan`, disable skip-permissions,
 and disable workspace auto-add for tasks that must not modify files.
 
+## Live Output (run in a visible terminal)
+
+Long AGY runs are invisible under `--format json`: output is buffered and returned
+once, so a 10-minute task looks like a hang. Prefer live progress in Claude Code:
+
+1. In terminal-panel environments, run the bridge in the user's Terminal panel
+   (the `run_in_terminal` tool) instead of a batch Bash call, so the user watches
+   progress while it happens. This also avoids the Bash tool's 2-minute stop.
+2. Pass `--format stream-json`: live progress lines land on stderr —
+   `[agy] tool write_file {…}` per tool call, `[agy] subagent started: <role>` /
+   `[agy] subagent done: <role> (<id>) (12s)`, `[agy] 🧠 turn done (15s) · 1292
+   thinking tokens` after a slow or thinking-heavy turn, `[agy] ⏱ tool done in
+   42s`, and `[agy] … still working` every 30s of stream silence — with the
+   final result still on stdout.
+3. Relay notable progress to the user by polling the terminal tab
+   (`read_terminal`): "AGY is now writing component X".
+
+Edge: model thinking does NOT stream — AGY's headless event protocol carries no
+thinking text, only per-turn `thinking_tokens`/`duration_seconds` counts (above).
+During an in-flight thinking turn the stream is fully silent, which is exactly
+what the 30s heartbeat disambiguates from a hang.
+
+Fallbacks without a visible terminal (cron/headless): run in the background with
+`--output-file <path>` and Read it after, or set `CC_ANTIGRAVITY_LOG_OUTPUT=1`
+and tail `%LOCALAPPDATA%\agy\cc-plugin-logs\plugin-YYYY-MM-DD.jsonl` (`agy.output.chunk`
+events) — `runs.jsonl` tracks run state by runId (STARTING→RUNNING→DONE).
+
 ## Natural Language → Flags Contract
 
 Translate the user's prose into explicit flags before invoking the bridge so the session

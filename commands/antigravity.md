@@ -73,7 +73,14 @@ AGY act on its own: AGY Auto mode where the CLI offers it, otherwise
   that the bridge reads AGY's `stream-json` internally and rebuilds the requested format.
   `--timeout <duration>` sets a hard ceiling. AGY older than 1.5.0 keeps a 10-minute ceiling.
 - Claude Code's Bash tool stops commands after 2 minutes by default (10 at most). Launch
-  long tasks with `run_in_background: true` and `--output-file <path>`, then Read the file.
+  long tasks with `run_in_background: true` and `--output-file <path>`, then Read the file —
+  or, in terminal-panel environments, run the bridge in the user's terminal panel
+  (`run_in_terminal`) so progress is visible live with no time limit.
+- Live progress by default where available: `--format stream-json` writes one line per
+  action to stderr (`[agy] tool …`, subagent start/done with role and id, `🧠 turn done`
+  after slow/thinking turns, `… still working` every 30s of stream silence); the final
+  result still reaches the caller unchanged. Do not subject the user to a long silent
+  `--format json` wait when a visible terminal or a background log tail is possible.
 
 ## Natural Language → Flags Contract
 
