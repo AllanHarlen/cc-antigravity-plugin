@@ -1,7 +1,7 @@
 {
     "name": "cc-antigravity-plugin",
     "displayName": "Antigravity CLI Integration",
-    "version": "4.6.0",
+    "version": "4.7.0",
     "description": "Agentic coding assistant powered by the direct Antigravity CLI (AGY) bridge. Use the command/skill path or the antigravity-coder subagent for implementation; the bundled antigravity-agent is read-only analysis only.",
     "author": {
         "name": "Allan Harlen",
@@ -34,7 +34,7 @@
     "requiresExternalTool": {
         "name": "agy",
         "installUrl": "https://antigravity.google/cli/install.sh",
-        "description": "Antigravity CLI (AGY) 1.1.8+ (1.4.0 recommended) — Google's long-context agentic coding terminal"
+        "description": "Antigravity CLI (AGY) 1.1.8+ (1.5.16 recommended) — Google's long-context agentic coding terminal"
     },
     "userConfig": {
         "default_model": {
@@ -52,8 +52,14 @@
         "timeout": {
             "type": "string",
             "title": "Default Timeout",
-            "description": "Default timeout for AGY print mode, for example 3m, 300s, or 5m0s.",
-            "default": "5m0s"
+            "description": "Optional hard ceiling for AGY print mode, for example 30m or 1h. Leave blank (default) for no ceiling: with AGY 1.5.0+ the run waits until the turn and its background work finish, guarded by the stall watchdog. AGY older than 1.5.0 keeps a 10-minute ceiling.",
+            "default": ""
+        },
+        "stall_timeout": {
+            "type": "string",
+            "title": "Stall Watchdog",
+            "description": "Runs without a ceiling only: stop AGY (exit 12) after this long without any progress event, for example 15m or 30m. 0 disables the watchdog.",
+            "default": "15m"
         },
         "coding_policy": {
             "type": "string",

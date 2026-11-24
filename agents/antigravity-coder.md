@@ -90,16 +90,23 @@ Example: "use o gemini 3.7 flash e desenvolva um front-end" becomes
 
 ## Execution Defaults
 
-Use agentic mode by default. The bridge forwards `--dangerously-skip-permissions`
-and adds the current working directory to the AGY workspace, so AGY uses its
-native tools (`write_to_file`, `replace_file_content`, `code_search`,
-`run_command`, etc.) without confirmation prompts.
+Use agentic mode by default. The bridge adds the current working directory to the AGY
+workspace and picks the permission mode: AGY Auto mode where the CLI offers it, otherwise
+`--dangerously-skip-permissions` (also the fallback when AGY reports Auto as unavailable
+for the account). AGY then uses its native tools (`write_to_file`,
+`replace_file_content`, `grep_search`, `run_command`, etc.) without confirmation prompts.
+Do not add `--skip-permissions` unless the caller asks for it.
 
 Use `--read-only` only when the task must not modify files.
 
 Headless execution uses a normal async child process and JSON by default, so stdout is
 reliable. For long or noisy responses, `--output-file <tmp-path>` remains available;
 use `--format stream-json` to expose tool/subagent progress on stderr.
+
+With AGY 1.5.0+ runs have no time ceiling (a 15-minute `--stall-timeout` watchdog stops
+silent runs). The Bash tool stops commands after 2 minutes by default (10 at most): for
+long tasks, run the bridge with `run_in_background: true` and `--output-file`, then Read
+the file; pass `--timeout <duration>` only when the caller wants a hard ceiling.
 
 Temp path by platform:
 - Unix/macOS: `/tmp/agy-coder-$$.txt`
@@ -200,5 +207,5 @@ IMAGE_SUGGESTIONS (caller: ask the user via AskUserQuestion, multiSelect; genera
 
 - Exit `10` (QUOTA_EXAUSTED): report the JSON signal and prefer its exact `--conversation <id>` retry; use `--continue` only when no ID is available.
 - Exit `11` (AUTH_REQUIRED): tell the user to run `agy` once interactively to sign in.
-- Exit `12` (TIMEOUT): suggest `--timeout 15m` or narrowing the task scope.
+- Exit `12` (TIMEOUT): the JSON signal says whether `--timeout` expired (`finished_reason: print_timeout`, partial `response` kept) or the stall watchdog fired; suggest a larger `--timeout`/`--stall-timeout`, resuming with the signal's `--conversation <id>`, or narrowing the task scope.
 - Exit `13` (AGY_MISSING): report the install instructions from the bridge output.

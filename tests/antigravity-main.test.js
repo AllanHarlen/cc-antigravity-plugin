@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import {
   main,
@@ -98,9 +100,24 @@ async function runMain(args, { spawnResult, asyncCalls = [], syncCalls = [], ...
     _resolveModelCatalog: async () => FALLBACK_MODEL_CATALOG,
     _loadNodePty: () => null,
     _conPtyTimeoutMs: 100,
+    // Hermetic capability cache: never read or write the real ~/.gemini cache.
+    _capabilityCachePath: path.join(CAPABILITY_CACHE_DIR, `${randomUUID()}.json`),
     ...overrides,
   });
   return { exitCode, io, asyncCalls, syncCalls };
+}
+
+const CAPABILITY_CACHE_DIR = fsSync.mkdtempSync(path.join(os.tmpdir(), "agy-capabilities-"));
+test.after(() => fsSync.rmSync(CAPABILITY_CACHE_DIR, { recursive: true, force: true }));
+
+// Spawn-sync stub reporting a given AGY version, for the modern-defaults tests.
+function versionSpawnSync(version, calls = []) {
+  return (command, args = []) => {
+    calls.push({ command, args });
+    if (command === "where" || command === "which") return { status: 0, stdout: "agy\n" };
+    if (args[0] === "--version") return { status: 0, stdout: `${version}\n` };
+    return { status: 0, stdout: "" };
+  };
 }
 
 test("main --help prints usage without spawning AGY", async () => {
@@ -640,16 +657,17 @@ test("main maps AGY_ERROR from stderr even with a partial JSON response", async 
   }
 });
 
-test("main guards Auto mode against an older CLI before starting a task", { skip: process.platform === "win32" }, async () => {
-  const { exitCode, io, asyncCalls } = await runMain(["--mode", "auto", "task"]);
+test("main guards Auto mode against an older CLI before starting a task", async () => {
+  const { exitCode, io, asyncCalls } = await runMain(["--mode", "auto", "task"], { _platform: "linux" });
   assert.equal(exitCode, EXIT_ERROR);
   assert.match(io.stderr, /requires AGY 1.3.5/);
   assert.equal(asyncCalls.length, 0);
 });
 
-test("main runs Auto mode on a supported CLI without permission bypass", { skip: process.platform === "win32" }, async () => {
+test("main runs Auto mode on a supported CLI without permission bypass", async () => {
   const { exitCode, asyncCalls } = await runMain(["--mode", "auto", "task"], {
-    _spawnSync: (command, args) => ({ status: 0, stdout: command === "which" ? "agy\n" : "1.4.0\n" }),
+    _platform: "linux",
+    _spawnSync: (command, args) => ({ status: 0, stdout: command === "which" || command === "where" ? "agy\n" : "1.4.0\n" }),
   });
   assert.equal(exitCode, EXIT_SUCCESS);
   assert.ok(!asyncCalls[0].args.includes("--dangerously-skip-permissions"));
@@ -676,4 +694,277 @@ test("main reports the minimum CLI version for base slugs before starting a task
   assert.equal(exitCode, EXIT_ERROR);
   assert.match(io.stderr, /require AGY 1.3.4/);
   assert.equal(asyncCalls.length, 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* AGY 1.5.x defaults (plugin 4.7.0): permissions, timeout, watchdog          */
+/* -------------------------------------------------------------------------- */
+
+const MODERN = { _spawnSync: versionSpawnSync("1.5.16"), _platform: "linux", _osRelease: "6.8.0" };
+const REAL_AUTO_WARNING = "warning: --mode auto is not available for this account; continuing in the default mode.\n";
+
+function streamResult(response = "stream done", extra = {}) {
+  return JSON.stringify({ event: "result", result: { conversation_id: "conv-modern", status: "SUCCESS", response, duration_seconds: 1, num_turns: 1, ...extra } }) + "\n";
+}
+
+// Child whose output is scripted on a timeline: [{ at, stdout?, stderr? }], then close.
+function timedSpawn(scripts, calls = []) {
+  let index = 0;
+  return (command, args, options) => {
+    calls.push({ command, args, options });
+    const script = scripts[Math.min(index, scripts.length - 1)];
+    index += 1;
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const timers = [];
+    child.kill = () => {
+      child.killed = true;
+      timers.forEach(clearTimeout);
+      child.emit("close", null);
+    };
+    for (const step of script.steps ?? []) {
+      timers.push(setTimeout(() => {
+        if (child.killed) return;
+        if (step.stdout) child.stdout.write(step.stdout);
+        if (step.stderr) child.stderr.write(step.stderr);
+      }, step.at));
+    }
+    if (!script.neverClose) {
+      timers.push(setTimeout(() => { if (!child.killed) child.emit("close", script.exitCode ?? 0); }, script.closeAt ?? 0));
+    }
+    return child;
+  };
+}
+
+function argAfter(args, flag) {
+  return args[args.indexOf(flag) + 1];
+}
+
+test("AGY 1.5.16 defaults: Auto mode without bypass, no --print-timeout, internal stream-json", async () => {
+  const { io } = await runMain(["--print-command", "task"], MODERN);
+  assert.match(io.stdout, /"--mode" "auto"/);
+  assert.doesNotMatch(io.stdout, /dangerously-skip-permissions/);
+  assert.doesNotMatch(io.stdout, /--print-timeout/);
+  assert.match(io.stdout, /"--output-format" "stream-json"/);
+  assert.doesNotMatch(io.stderr, /predates/);
+});
+
+test("AGY 1.5.16 on Windows before 24H2 keeps the bypass but is still unlimited", async () => {
+  const { io } = await runMain(["--print-command", "task"], { ...MODERN, _platform: "win32", _osRelease: "10.0.22631" });
+  assert.match(io.stdout, /dangerously-skip-permissions/);
+  assert.doesNotMatch(io.stdout, /"--mode"/);
+  assert.doesNotMatch(io.stdout, /--print-timeout/);
+});
+
+test("explicit --mode auto on Windows is validated against the detected CLI and build", async () => {
+  const ok = await runMain(["--print-command", "--mode", "auto", "task"], { ...MODERN, _platform: "win32", _osRelease: "10.0.26100" });
+  assert.equal(ok.exitCode, EXIT_SUCCESS);
+  assert.match(ok.io.stdout, /"--mode" "auto"/);
+
+  const oldCli = await runMain(["--mode", "auto", "task"], { _spawnSync: versionSpawnSync("1.4.3"), _platform: "win32", _osRelease: "10.0.26100" });
+  assert.equal(oldCli.exitCode, EXIT_ERROR);
+  assert.match(oldCli.io.stderr, /AGY 1\.4\.4/);
+  assert.equal(oldCli.asyncCalls.length, 0);
+
+  const oldWindows = await runMain(["--mode", "auto", "task"], { ...MODERN, _platform: "win32", _osRelease: "10.0.22631" });
+  assert.equal(oldWindows.exitCode, EXIT_ERROR);
+  assert.match(oldWindows.io.stderr, /24H2/);
+  assert.equal(oldWindows.asyncCalls.length, 0);
+});
+
+test("explicit --read-only and --skip-permissions win over the Auto default", async () => {
+  const readOnly = await runMain(["--print-command", "--read-only", "task"], MODERN);
+  assert.match(readOnly.io.stdout, /"--mode" "plan"/);
+  assert.doesNotMatch(readOnly.io.stdout, /dangerously-skip-permissions/);
+  const bypass = await runMain(["--print-command", "--skip-permissions", "task"], MODERN);
+  assert.match(bypass.io.stdout, /dangerously-skip-permissions/);
+  assert.doesNotMatch(bypass.io.stdout, /"--mode"/);
+});
+
+test("implicit Auto refused at startup is stopped and retried exactly once with bypass, then remembered", async () => {
+  const asyncCalls = [];
+  const cachePath = path.join(CAPABILITY_CACHE_DIR, `${randomUUID()}.json`);
+  const { exitCode, io } = await runMain(["task"], {
+    ...MODERN,
+    _capabilityCachePath: cachePath,
+    _spawn: timedSpawn([
+      { steps: [{ at: 1, stderr: REAL_AUTO_WARNING }], neverClose: true },
+      { steps: [{ at: 1, stdout: streamResult("done after fallback") }], closeAt: 5 },
+    ], asyncCalls),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(asyncCalls.length, 2);
+  assert.equal(argAfter(asyncCalls[0].args, "--mode"), "auto");
+  assert.ok(!asyncCalls[0].args.includes("--dangerously-skip-permissions"));
+  assert.ok(asyncCalls[1].args.includes("--dangerously-skip-permissions"));
+  assert.ok(!asyncCalls[1].args.includes("--mode"));
+  assert.equal(io.stdout, "done after fallback\n");
+  assert.match(io.stderr, /retrying once with --dangerously-skip-permissions/);
+
+  const next = [];
+  await runMain(["task"], { ...MODERN, _capabilityCachePath: cachePath, _spawn: timedSpawn([{ steps: [{ at: 1, stdout: streamResult() }], closeAt: 5 }], next) });
+  assert.equal(next.length, 1, "the cached refusal skips the doomed Auto attempt");
+  assert.ok(next[0].args.includes("--dangerously-skip-permissions"));
+});
+
+test("no fallback once an agent step already ran", async () => {
+  const asyncCalls = [];
+  const step = JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "x" } }) + "\n";
+  const { exitCode } = await runMain(["task"], {
+    ...MODERN,
+    _spawn: timedSpawn([{ steps: [{ at: 1, stdout: step }, { at: 3, stderr: REAL_AUTO_WARNING }, { at: 5, stdout: streamResult() }], closeAt: 8 }], asyncCalls),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(asyncCalls.length, 1);
+});
+
+test("explicit --mode auto never falls back to the bypass", async () => {
+  const asyncCalls = [];
+  const { exitCode } = await runMain(["--mode", "auto", "task"], {
+    ...MODERN,
+    _spawn: timedSpawn([{ steps: [{ at: 1, stderr: REAL_AUTO_WARNING }, { at: 3, stdout: streamResult() }], closeAt: 6 }], asyncCalls),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(asyncCalls.length, 1);
+  assert.ok(!asyncCalls[0].args.includes("--dangerously-skip-permissions"));
+});
+
+test("an explicit --timeout is forwarded with native json output", async () => {
+  const { io } = await runMain(["--print-command", "--timeout", "3m", "task"], MODERN);
+  assert.match(io.stdout, /"--print-timeout" "3m"/);
+  assert.match(io.stdout, /"--output-format" "json"/);
+});
+
+test("the bridge timer gives AGY a grace period past an explicit --timeout", async () => {
+  const started = Date.now();
+  const { exitCode, io } = await runMain(["--timeout", "20ms", "task"], {
+    ...MODERN,
+    _timeoutGraceMs: 60,
+    _spawn: timedSpawn([{ neverClose: true }]),
+  });
+  assert.equal(exitCode, EXIT_TIMEOUT);
+  assert.ok(Date.now() - started >= 75, "timer = timeout + grace");
+  assert.match(io.stdout, /"status":"TIMEOUT"/);
+});
+
+test("--timeout 0 means no ceiling on a modern CLI", async () => {
+  const { io } = await runMain(["--print-command", "--timeout", "0", "task"], MODERN);
+  assert.doesNotMatch(io.stdout, /--print-timeout/);
+});
+
+test("a pre-1.5.0 CLI keeps the 10-minute ceiling, the bypass default, and warns once", async () => {
+  const { io } = await runMain(["--print-command", "task"], { _spawnSync: versionSpawnSync("1.4.0"), _platform: "linux" });
+  assert.match(io.stdout, /"--print-timeout" "600000ms"/);
+  assert.match(io.stdout, /"--mode" "auto"/, "1.4.0 on Linux does offer Auto mode");
+  assert.equal(io.stderr.match(/predates 1\.5\.0/g)?.length, 1);
+});
+
+test("watchdog: periodic stream events keep an unlimited run alive and json output is unchanged", async () => {
+  const step = JSON.stringify({ event: "step_update", step_update: { step_type: "tool", tool_info: { name: "view_file", parameters: {} } } }) + "\n";
+  const steps = [1, 2, 3, 4, 5].map((n) => ({ at: n * 25, stdout: step }));
+  const { exitCode, io } = await runMain(["--skip-permissions", "--stall-timeout", "60ms", "task"], {
+    ...MODERN,
+    _spawn: timedSpawn([{ steps: [...steps, { at: 150, stdout: streamResult("long run done") }], closeAt: 160 }]),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(io.stdout, "long run done\n");
+  assert.doesNotMatch(io.stderr, /\[agy\] tool/, "internal stream progress never reaches the caller's stderr");
+});
+
+test("watchdog: a silent unlimited run is stopped with exit 12 and a stall TIMEOUT signal", async () => {
+  const { exitCode, io } = await runMain(["--skip-permissions", "--stall-timeout", "30ms", "task"], {
+    ...MODERN,
+    _spawn: timedSpawn([{ neverClose: true }]),
+  });
+  assert.equal(exitCode, EXIT_TIMEOUT);
+  const signal = JSON.parse(io.stdout.trim().split("\n")[0]);
+  assert.equal(signal.status, "TIMEOUT");
+  assert.match(signal.reason, /stall watchdog/);
+});
+
+test("--stall-timeout 0 disables the watchdog and keeps AGY's native format", async () => {
+  const { io } = await runMain(["--print-command", "--stall-timeout", "0", "task"], MODERN);
+  assert.match(io.stdout, /"--output-format" "json"/);
+  assert.doesNotMatch(io.stdout, /--print-timeout/);
+});
+
+test("text format over the internal stream prints the final response", async () => {
+  const asyncCalls = [];
+  const { exitCode, io } = await runMain(["--format", "text", "--skip-permissions", "task"], {
+    ...MODERN,
+    _spawn: timedSpawn([{ steps: [{ at: 1, stdout: streamResult("plain answer") }], closeAt: 3 }], asyncCalls),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.equal(argAfter(asyncCalls[0].args, "--output-format"), "stream-json");
+  assert.equal(io.stdout, "plain answer\n");
+});
+
+test("--json-schema rides the internal stream (AGY 1.5.16 honors it on the result)", async () => {
+  const { io } = await runMain(["--print-command", "--json-schema", '{"type":"object"}', "task"], MODERN);
+  assert.match(io.stdout, /"--output-format" "stream-json"/);
+  assert.match(io.stdout, /--json-schema/);
+});
+
+test("real AGY 1.5.16 print timeout envelope maps to exit 12 with the partial-turn signal", async () => {
+  const envelope = {
+    conversation_id: "c9015c36-test", status: "ERROR", response: "partial", num_turns: 1,
+    error: "print timeout after 2s with the turn still in progress; the response is partial",
+    finished_reason: "print_timeout",
+  };
+  const stderr = "[agy] print timeout after 2s with turn in progress; returning partial output\n" +
+    'AGY_ERROR: {"short_error":"print timeout after 2s with the turn still in progress; the response is partial","status":"DEADLINE_EXCEEDED","retryable":false,"reason":"print_timeout"}\n';
+  const { exitCode, io } = await runMain(["--timeout", "2s", "task"], {
+    ...MODERN,
+    spawnResult: { stdout: JSON.stringify(envelope), stderr, exitCode: 3 },
+  });
+  assert.equal(exitCode, EXIT_TIMEOUT);
+  const signal = JSON.parse(io.stdout.trim().split("\n").at(-1));
+  assert.equal(signal.status, "TIMEOUT");
+  assert.equal(signal.finished_reason, "print_timeout");
+  assert.equal(signal.response, "partial");
+  assert.equal(signal.conversation_id, "c9015c36-test");
+});
+
+test("a spend-cap AGY_ERROR exits 10 with a retry hint", async () => {
+  const { exitCode, io } = await runMain(["--timeout", "1m", "task"], {
+    ...MODERN,
+    spawnResult: {
+      stdout: JSON.stringify({ conversation_id: "conv-cap", status: "ERROR", response: "", error: "" }),
+      stderr: 'AGY_ERROR: {"status":"FAILED_PRECONDITION","message":"Spend cap reached"}\n',
+      exitCode: 1,
+    },
+  });
+  assert.equal(exitCode, EXIT_QUOTA_EXAUSTED);
+  const signal = JSON.parse(io.stdout.trim().split("\n").at(-1));
+  assert.equal(signal.status, "QUOTA_EXHAUSTED");
+  assert.equal(signal.retry, "--conversation conv-cap");
+});
+
+test("an empty response in an unlimited run is EXIT_ERROR (there is no timeout to be near)", async () => {
+  const { exitCode, io } = await runMain(["--skip-permissions", "task"], {
+    ...MODERN,
+    _spawn: timedSpawn([{ steps: [{ at: 1, stdout: streamResult("") }], closeAt: 3 }]),
+  });
+  assert.equal(exitCode, EXIT_ERROR);
+  assert.match(io.stdout, /"status":"EMPTY_RESPONSE".*timeout none/);
+});
+
+test("-r <id> and --resume <id> are forwarded as --conversation", async () => {
+  for (const flag of ["-r", "--resume"]) {
+    const { io } = await runMain(["--print-command", flag, "abc", "task"], MODERN);
+    assert.match(io.stdout, /"--conversation" "abc"/);
+  }
+});
+
+test("--print-command without an installed agy shows the recommended-version defaults", async () => {
+  const { exitCode, io } = await runMain(["--print-command", "task"], {
+    _platform: "linux",
+    _spawnSync: (command) => (command === "where" || command === "which"
+      ? { status: 1, stdout: "" }
+      : { error: Object.assign(new Error("spawn agy ENOENT"), { code: "ENOENT" }), status: null }),
+  });
+  assert.equal(exitCode, EXIT_SUCCESS);
+  assert.match(io.stderr, /could not read the AGY version/);
+  assert.match(io.stdout, /"--mode" "auto"/);
 });

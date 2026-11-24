@@ -156,5 +156,5 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-bridge.js" \
 
 - Exit `10` (QUOTA_EXAUSTED): report the JSON signal and prefer its exact `--conversation <id>` retry; use `--continue` only when no ID is available.
 - Exit `11` (AUTH_REQUIRED): tell the user to run `agy` once interactively.
-- Exit `12` (TIMEOUT): suggest `--timeout 15m` or narrowing the task scope.
+- Exit `12` (TIMEOUT): the JSON signal says whether `--timeout` expired (`finished_reason: print_timeout`, partial `response` kept) or the stall watchdog fired; suggest a larger `--timeout`/`--stall-timeout`, resuming with the signal's `--conversation <id>`, or narrowing the task scope.
 - Exit `13` (AGY_MISSING): report the install instructions from the bridge output.

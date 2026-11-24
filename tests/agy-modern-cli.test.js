@@ -34,15 +34,17 @@ test("Auto mode rejects explicit bypass in either flag order", () => {
   assert.throws(() => buildAntigravityArgs({ mode: "auto", skipPermissions: true }), /cannot bypass/);
 });
 
-test("Auto mode reports unsupported Windows and read-only retains precedence", () => {
-  assert.throws(() => parseCliArgs(["--mode", "auto", "task"], { platform: "win32" }), /Windows/);
+test("Auto mode parses on every platform (support is decided from the detected CLI) and read-only retains precedence", () => {
+  const parsed = parseCliArgs(["--mode", "auto", "task"]);
+  assert.equal(parsed.mode, "auto");
+  assert.equal(parsed.skipPermissions, false);
   for (const argv of [
     ["--mode", "auto", "--read-only", "task"],
     ["--read-only", "--mode", "auto", "task"],
   ]) {
-    const parsed = parseCliArgs(argv, { platform: "win32" });
-    assert.equal(parsed.mode, "plan");
-    assert.equal(parsed.skipPermissions, false);
+    const readOnly = parseCliArgs(argv);
+    assert.equal(readOnly.mode, "plan");
+    assert.equal(readOnly.skipPermissions, false);
   }
 });
 
@@ -108,10 +110,11 @@ test("successful responses discussing auth and AGY_ERROR never become failures",
   assert.equal(classifyAgyOutput("Authentication expired. Please log back in.", { exitCode: 1 }).type, "AUTH_REQUIRED");
 });
 
-test("read-only uses the current search baseline while prohibiting commands and writes", () => {
+test("read-only uses the loaded search tools while prohibiting commands and writes", () => {
   const prompt = buildAntigravityPrompt({ task: "review", context: { included: [], skipped: [] }, readOnly: true });
-  assert.match(prompt, /code_search/);
-  assert.match(prompt, /Do not assume legacy/);
+  // AGY 1.5.16's init event lists grep_search, find_by_name, list_dir, and view_file (no code_search).
+  assert.match(prompt, /grep_search, find_by_name, list_dir, and view_file/);
+  assert.match(prompt, /Do not assume a tool exists/);
   assert.match(prompt, /Do not call write_to_file.*or run_command/);
 });
 

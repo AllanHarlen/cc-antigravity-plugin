@@ -465,12 +465,14 @@ test("parseCliArgs parses dirs, files, and positional task", () => {
     jsonSchema: undefined,
     disableSlashCommands: true,
     timeout: undefined,
+    stallTimeout: undefined,
     interactive: false,
     readOnly: false,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
-    skipPermissions: true,   // agentic default
+    skipPermissions: true,   // legacy default; mainImpl resolves the real strategy
+    explicitSkipPermissions: false,
     maxFiles: 40,
     maxFileBytes: 32768,
     printCommand: false,

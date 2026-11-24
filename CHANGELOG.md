@@ -2,6 +2,78 @@
 
 Todas as mudancas notaveis deste plugin sao documentadas aqui.
 
+## [4.7.0] - 2026-11-24 - Compatibilidade com AGY CLI 1.5.16
+
+- Revisadas as releases oficiais de 1.4.1 a 1.5.16. Base mantida em AGY 1.1.8+, com
+  1.5.16 recomendado. Abaixo de 1.5.0 o bridge mantém os padrões legados (teto de 10 min,
+  bypass) e avisa uma vez. O hook SessionStart passa a alertar CLIs anteriores a 1.5.0.
+- A versão do AGY é lida antes de montar o argv (`resolveRuntimeCapabilities`). Assim,
+  modo de permissão e timeout dependem da CLI instalada. `--print-command` sem `agy`
+  assume os padrões da 1.5.16 e avisa.
+- **Permissões.** Sem `--mode`/`--skip-permissions`/`--read-only`, o padrão é Auto mode
+  (`--mode auto`, sem bypass) onde o AGY oferece: AGY 1.3.5+ em Linux/macOS, AGY 1.4.4+ no
+  Windows 11 24H2+ (build 26100). O bloqueio fixo de Auto no Windows foi removido, e
+  `--mode auto` explícito é validado contra versão e build.
+  - Verificado no AGY 1.5.16 real: com Auto indisponível para a conta, o AGY não falha.
+    Ele emite `warning: --mode auto is not available for this account; continuing in the
+    default mode.` (~0,5 s, antes de qualquer evento) e segue no modo padrão, que nega
+    toda permissão em headless.
+  - O bridge interrompe essa execução no aviso, sem nenhum passo executado. Em seguida
+    refaz uma única vez com `--dangerously-skip-permissions`, registra
+    `bridge.permission.fallback` e grava a recusa por 24 h por versão em
+    `~/.gemini/antigravity-cli/cache/cc-antigravity-capabilities.json`.
+  - Nunca há retry com `--mode auto` explícito nem depois de um passo. Imagem e
+    `--interactive` mantêm o bypass.
+- **Timeout ilimitado por padrão (AGY 1.5.0+).** Sem `--timeout`, o bridge não envia
+  `--print-timeout`. O AGY espera o turno e as tarefas em background e subagents
+  não-daemon.
+  - Novo watchdog `--stall-timeout` (padrão `15m`, `0` desliga; também
+    `userConfig.stall_timeout`). O bridge pede `stream-json` internamente e remonta
+    `json`/`text` sem mudança na saída; o progresso vai só para o log.
+  - Verificado que o AGY 1.5.16 honra `--json-schema` em `stream-json`
+    (`structured_output` no resultado), então o watchdog também cobre schemas.
+  - `--timeout` explícito continua como teto, e o timer do bridge espera 30 s a mais para
+    o AGY reportar o turno parcial. `--timeout 0` equivale a nenhum teto.
+  - O `userConfig.timeout` passou de `5m0s` para vazio.
+  - `EMPTY_RESPONSE` sem teto finito sai sempre com 1.
+- **Término antecipado.** `finished_reason` (AGY 1.4.11+) é lido de json e stream-json.
+  `print_timeout` vira exit 12; o mesmo vale para a linha `[agy] print timeout after` ou
+  um `AGY_ERROR` com `"reason":"print_timeout"`. O sinal preserva `response` parcial,
+  `conversation_id`, `finished_reason` e `agy_error`. `interrupted` vira `INTERRUPTED`
+  (exit 1). Exit 3 sozinho não vira timeout. `short_error` do AGY_ERROR real passa a
+  compor o motivo. Fixtures reais capturadas do AGY 1.5.16.
+- **Cota.** Corrigido `ReferenceError`: `EXIT_QUOTA_EXHAUSTED` não existia e derrubava um
+  AGY_ERROR com status não mapeado e mensagem de cota para exit 1. Adicionados os padrões
+  de spend cap, saldo pré-pago e cota semanal (AGY 1.5.10). O sinal `QUOTA_EXHAUSTED`
+  também traz `retry`.
+- **`-r` / `--resume <id>`** (AGY 1.5.16) aceitos como aliases de `--conversation`. O
+  bridge continua enviando `--conversation`.
+- **Modelos Gemini 4.**
+  - `modelVersion` reconhece gerações só com major (`gemini-4-neon-high` → 4.0; `120b`
+    não conta como versão).
+  - `hydrogen`, `neon`, `argon`, `carbon` e `orchestrator` resolvem como famílias,
+    conferidas contra o catálogo real do 1.5.16.
+  - Fallback de emergência, `pro` e `--model auto` (Flash mais novo) inalterados.
+- **Prompts.** O init do AGY 1.5.16 lista `grep_search`, `find_by_name`, `list_dir` e
+  `view_file` (sem `code_search`). Os prompts agêntico e read-only deixam de declarar
+  essas ferramentas como legadas.
+- `spawnHeadless` resolve timeout e abort antes de matar o processo, para que o `close`
+  do filho não transforme um timeout em erro genérico. Journal e `bridge.exit` registram
+  a estratégia de permissão.
+- Docs (README, README.pt-BR, comando, skill, agents, CASOS_USO, política SessionStart):
+  - Auto mode e o fallback;
+  - timeout ilimitado com `run_in_background` no Claude Code;
+  - `--stall-timeout`, `-r`/`--resume` e os aliases Gemini 4;
+  - denylist da 1.5.2 e `~/.agents/skills`;
+  - nota de que o plugin não deve rodar importado no AGY (`agy plugin import`).
+  - Corrigidos `gemini-3.7-flash-low` e `--print-timeout 5m` em CASOS_USO.
+- Versões 4.7.0 sincronizadas em package, lockfile e manifests, com contract test.
+- Validação: 266 testes aprovados, 1 teste live ignorado. Smoke com AGY 1.5.16 real no
+  Windows 11 build 26300: fallback Auto → bypass e cache, segunda execução direto em
+  bypass, `--timeout 2s` → exit 12 com `finished_reason`, `--json-schema` → `{"ok":true}`,
+  `--read-only` e `--format text`. `AGY_LIVE=1` falha por decisão: o fallback não
+  inclui os modelos Gemini 4.
+
 ## [4.6.0] - 2026-10-16 - Compatibilidade com AGY CLI 1.4.0
 
 - Revisadas as releases oficiais até 1.4.0. Base mantida em AGY 1.1.8+, com

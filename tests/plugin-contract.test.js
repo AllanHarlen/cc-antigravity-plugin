@@ -137,3 +137,29 @@ test("documentation routes coding away from antigravity-agent", async () => {
   assert.match(useCases, /\/cc-antigravity-plugin:antigravity --parallel --add-dir \.\/frontend/);
   assert.match(useCases, /Nunca usar Agent\(subagent_type="cc-antigravity-plugin:antigravity-agent"\) para coding/);
 });
+
+test("manifests agree on the plugin version and the AGY 1.5 timeout defaults", async () => {
+  const pkg = JSON.parse(await read("package.json"));
+  const lock = JSON.parse(await read("package-lock.json"));
+  const manifest = JSON.parse(await read(".claude-plugin/plugin.json"));
+  const marketplace = JSON.parse(await read(".claude-plugin/marketplace.json"));
+
+  for (const version of [lock.version, lock.packages[""].version, manifest.version, marketplace.plugins[0].version]) {
+    assert.equal(version, pkg.version);
+  }
+  assert.match(manifest.requiresExternalTool.description, /1\.5\.16 recommended/);
+  assert.equal(manifest.userConfig.timeout.default, "", "no ceiling by default on AGY 1.5.0+");
+  assert.equal(manifest.userConfig.stall_timeout.default, "15m");
+});
+
+test("docs describe Auto-mode permissions and the unlimited timeout instead of an always-on bypass", async () => {
+  const command = await read("commands/antigravity.md");
+  const skill = await read("skills/SKILL.md");
+
+  assert.doesNotMatch(command, /is always forwarded/);
+  for (const source of [command, skill]) {
+    assert.match(source, /--stall-timeout/);
+    assert.match(source, /run_in_background/);
+    assert.match(source, /AGY CLI 1\.5 compatibility/);
+  }
+});

@@ -1,7 +1,7 @@
 ---
 description: Invoke the Antigravity (AGY) bridge directly as the canonical agentic coding path; creates, edits, and searches files using AGY's native tools
 allowed-tools: Bash(node *antigravity-bridge.js*), Glob, Read
-argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high|xhigh|max] [--mode plan|accept-edits|auto] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--design-system dir,...] [--read-only] [--interactive] [--continue] [--conversation id] [--timeout duration] <task>"
+argument-hint: "[--model name] [--format text|json|stream-json] [--effort low|medium|high|xhigh|max] [--mode plan|accept-edits|auto] [--agent name] [--json-schema value] [--allow-slash-commands] [--generate-image] [--parallel] [--subagent-model name] [--dirs path,...] [--add-dir path] [--files pattern,...] [--design-system dir,...] [--read-only] [--interactive] [--continue] [--conversation|-r|--resume id] [--timeout duration] [--stall-timeout duration] <task>"
 ---
 
 # /cc-antigravity-plugin:antigravity Command
@@ -14,8 +14,9 @@ Use this command directly for any task that creates, edits, deletes, moves, or
 formats files. Do not route coding work through `antigravity-agent`; that agent is
 read-only and exists only for analysis/planning.
 
-By default, the bridge runs with `--dangerously-skip-permissions` and adds the current
-working directory to the AGY workspace. Pass `--read-only` for analysis-only tasks.
+By default, the bridge adds the current working directory to the AGY workspace and lets
+AGY act on its own: AGY Auto mode where the CLI offers it, otherwise
+`--dangerously-skip-permissions` (see Defaults). Pass `--read-only` for analysis-only tasks.
 
 ## Usage
 
@@ -34,7 +35,7 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 | `--model <name>` | Native AGY model slug or alias. The bridge discovers `agy models` with a 24-hour cache; omit it to preserve the user's AGY `/model`. | `--model gemini-3.8-flash-high` |
 | `--format <format>` | Headless output: `text`, `json`, or `stream-json` (default: `json`). Stream progress is written to stderr and only the final result to stdout. | `--format stream-json` |
 | `--effort <level>` | Native reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max` (model-dependent). Only forwarded when explicitly requested. | `--effort high` |
-| `--mode <mode>` | Native permission mode: `plan`, `accept-edits`, or `auto` (AGY 1.3.5+, Linux/macOS; no permission bypass). | `--mode plan` |
+| `--mode <mode>` | Native permission mode: `plan`, `accept-edits`, or `auto` (AGY 1.3.5+ on Linux/macOS, AGY 1.4.4+ on Windows 11 24H2+; no permission bypass). | `--mode plan` |
 | `--agent <name>` | Select a custom AGY agent; this is not an interactive-mode alias. | `--agent code-reviewer` |
 | `--json-schema <value>` | Object-root JSON Schema string or file; validated before AGY starts; implies `--format json`. | `--json-schema schema.json` |
 | `--allow-slash-commands` | Re-enable slash-command/skill expansion. Headless prompts disable it by default so task text is data. | `--allow-slash-commands` |
@@ -47,8 +48,9 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 | `--design-system <dir,...>` | Inline an Open Design package's core files in full (outside `--max-files`/`--max-file-bytes`) and list the rest for on-demand reads | `--design-system packages/ui/design-systems/bmw` |
 | `--read-only` | Force native `--mode plan`, disable skip-permissions/workspace auto-add, and keep slash expansion enabled because AGY 1.1.16 otherwise ignores plan mode. | `--read-only` |
 | `--continue`, `-c` | Continue the most recent AGY conversation | `--continue` |
-| `--conversation <id>` | Resume a specific AGY conversation | `--conversation abc123` |
-| `--timeout <duration>` | Forward `--print-timeout` to AGY | `--timeout 10m` |
+| `--conversation <id>` | Resume a specific AGY conversation (aliases `-r`, `--resume`) | `--conversation abc123` |
+| `--timeout <duration>` | Hard ceiling forwarded as `--print-timeout`; default none on AGY 1.5.0+ (`0` also means none) | `--timeout 30m` |
+| `--stall-timeout <duration>` | Runs without a ceiling: stop AGY (exit 12) after this long without progress events; default `15m`, `0` disables | `--stall-timeout 30m` |
 | `--output-file <path>` | Write the parsed final AGY response to a file instead of stdout. | `--output-file out.txt` |
 | `--output-dir <path>` | Destination directory for generated images (used with `--generate-image`) | `--output-dir ./assets` |
 | `--interactive` | Use AGY `--prompt-interactive` for a human-at-terminal session | `--interactive` |
@@ -57,10 +59,21 @@ working directory to the AGY workspace. Pass `--read-only` for analysis-only tas
 
 ## Defaults
 
-- `--dangerously-skip-permissions` is always forwarded (agentic mode)
+- Permissions: without `--mode`, `--skip-permissions`, or `--read-only`, the bridge uses
+  AGY Auto mode (`--mode auto`, no bypass) where the CLI offers it (AGY 1.3.5+ on
+  Linux/macOS, AGY 1.4.4+ on Windows 11 24H2+). When AGY reports Auto as unavailable for
+  the account (Gemini Enterprise, Linux without user namespaces), the bridge stops the run
+  before any step and retries once with `--dangerously-skip-permissions`, remembering that
+  for 24h per AGY version. Elsewhere `--dangerously-skip-permissions` is forwarded as before.
+  Since AGY 1.5.2 the bypass still blocks commands on the system denylist.
 - The current working directory is added to AGY's workspace via `--add-dir <cwd>`
-- Headless mode uses `--output-format json --disable-slash-commands`
-- Timeout: 10 minutes (override with `--timeout`)
+- Headless mode disables slash commands and prints only the final response (`json` by default)
+- Timeout: none on AGY 1.5.0+ — AGY waits until the turn and its non-daemon background
+  work finish, while a 15-minute stall watchdog (`--stall-timeout`) stops silent runs. For
+  that the bridge reads AGY's `stream-json` internally and rebuilds the requested format.
+  `--timeout <duration>` sets a hard ceiling. AGY older than 1.5.0 keeps a 10-minute ceiling.
+- Claude Code's Bash tool stops commands after 2 minutes by default (10 at most). Launch
+  long tasks with `run_in_background: true` and `--output-file <path>`, then Read the file.
 
 ## Natural Language → Flags Contract
 
@@ -82,6 +95,8 @@ also normalizes loose names defensively, but pass the canonical id whenever you 
 | "claude opus", "opus" | `--model opus` | Newest Opus available from `agy models` |
 | "claude sonnet", "sonnet" | `--model sonnet` | Newest Sonnet available from `agy models` |
 | "gpt oss" | `--model gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
+| "hydrogen", "neon", "argon", "carbon" (Gemini 4) | `--model hydrogen` | Highest tier of that Gemini 4 family in `agy models` |
+| "orchestrator" | `--model orchestrator` | Orchestrator (default planner); `orchestrator neon`/`argon` pick the planner |
 | "pick the model for me" | `--model auto` | Flash tier chosen by context size |
 | (no model mentioned) | omit `--model` | Preserve the user's current AGY `/model` |
 
@@ -91,7 +106,7 @@ Unknown models are omitted with a stderr warning that lists the valid runtime sl
 
 ### Mode selection (agentic vs read-only)
 
-The default mode is **agentic** (`--dangerously-skip-permissions` + workspace auto-add).
+The default mode is **agentic** (Auto mode or permission bypass, plus workspace auto-add).
 Choose the mode from the verb in the request:
 
 | Intent in the request | Mode |
@@ -133,12 +148,12 @@ Guidance:
 |------|---------|--------|
 | `0` | Success | — |
 | `1` | Generic error | Check stderr |
-| `10` | `QUOTA_EXAUSTED` | Retry later or switch model; structured JSON emitted to stdout |
+| `10` | `QUOTA_EXAUSTED` | Retry later or switch model; structured JSON emitted to stdout. Includes AGY 1.5.10 spend-cap, prepaid-balance, and weekly-quota stops |
 | `11` | `AUTH_REQUIRED` | Run `agy` once interactively to sign in |
-| `12` | `TIMEOUT` | Increase `--timeout` or narrow the task scope |
+| `12` | `TIMEOUT` | `--timeout` expired (`finished_reason: print_timeout`, partial `response` kept in the signal) or the stall watchdog fired; raise `--timeout`/`--stall-timeout` or narrow the task scope |
 | `13` | `AGY_MISSING` | Install AGY (see below) |
 
-When exit code `10` or `11` is returned, a JSON line is written to stdout:
+When exit code `10`, `11`, or `12` is returned, a JSON line is written to stdout:
 ```json
 {"status":"QUOTA_EXAUSTED","reason":"Individual quota reached","model":"gemini-3.7-flash-high","conversation_id":"...","usage":{},"retry":"--conversation ..."}
 ```
@@ -195,21 +210,40 @@ subagent tools, then aggregates the results and reports each subagent's conversa
 | Authentication error | Launch `agy` once interactively and sign in. Use `/logout` inside the TUI to clear cached credentials. |
 | AGY missing on PATH | macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh \| bash`  Windows: `irm https://antigravity.google/cli/install.ps1 \| iex` |
 | QUOTA_EXAUSTED | Wait for quota reset or use `--continue` to resume with a narrower scope. |
-| Timeout | Increase `--timeout 15m`, reduce the task scope, or split into steps. |
+| Timeout | Raise `--timeout` / `--stall-timeout`, reduce the task scope, or split into steps. Resume a cut-off turn with the signal's `--conversation <id>`. |
+
+## AGY CLI 1.5 compatibility
+
+- Use AGY 1.5.16 for current behavior; the baseline remains 1.1.8. Below 1.5.0 the
+  bridge keeps its legacy defaults (10-minute ceiling, permission bypass).
+- Auto mode is the default where available (see Defaults). Pass `--mode auto` explicitly
+  only when requested: an explicit request is validated against the detected AGY version
+  and Windows build, rejects `--skip-permissions`, and never falls back to the bypass.
+  When the account lacks Auto, AGY continues in the default mode and headless runs
+  auto-deny every permission request.
+- `-r <id>` and `--resume <id>` (AGY 1.5.16 aliases) are accepted; the bridge forwards
+  `--conversation <id>`, which every supported AGY understands.
+- Gemini 4 models resolve by family name (`hydrogen`, `neon`, `argon`, `carbon`) and
+  `orchestrator`; the runtime catalog stays authoritative and `--model auto` still picks
+  the newest Flash tier.
+- AGY 1.5.0 headless runs wait for background tasks and subagents; daemon tasks such as
+  dev servers do not hold the run. AGY 1.5.5+ exits within 30 seconds of the result.
+- AGY 1.5.16 discovers cross-tool skills in `~/.agents/skills`. `agy plugin import` and
+  `agy plugin install` can convert Claude Code plugins, but this plugin delegates to AGY;
+  running it inside AGY would delegate AGY to itself, so keep using it from Claude Code.
 
 ## AGY CLI 1.4 compatibility
 
-- Use AGY 1.4.0 for current behavior. The baseline remains 1.1.8; Auto mode requires
-  1.3.5+ on Linux/macOS. Pass `--mode auto` only when requested. The bridge disables
-  its default permission bypass in Auto mode and rejects `--skip-permissions` with it.
+- Auto mode requires 1.3.5+ on Linux/macOS (1.4.4+ on Windows 11 24H2+). The bridge
+  disables its permission bypass in Auto mode and rejects `--skip-permissions` with it.
   Headless runs cannot answer approval prompts; use `--interactive` when review is needed.
 - Pass an exact base slug such as `--model gemini-3.8-flash` on AGY 1.3.4+ to let
   AGY pick the model's default effort. Omit `--effort` unless explicitly requested.
   Generic `opus`/`sonnet` aliases follow the authenticated runtime catalog, including
   Claude 5.5 when available to the account; do not invent unavailable model IDs.
-- Use available search tools such as `code_search` and `view_file`; legacy
-  `grep_search`, `find_by_name`, and `list_dir` are no longer in the default toolset.
-  Read-only tasks must still avoid `run_command` and all writes.
+- Use the search tools AGY loaded for the run: AGY 1.5.16 lists `grep_search`,
+  `find_by_name`, `list_dir`, and `view_file` (some 1.2.7-1.4 builds exposed
+  `code_search` instead). Read-only tasks must still avoid `run_command` and all writes.
 - Treat a structured `AGY_ERROR` signal as failure even if it contains a partial
   `response`. The `agy_error` field preserves upstream status, code, retryability,
   and error ID when supplied. Quota/auth/timeout still map to exits 10/11/12.

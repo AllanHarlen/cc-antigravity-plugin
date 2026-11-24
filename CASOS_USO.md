@@ -100,20 +100,20 @@ Deixar o bridge escolher o modelo baseado no tamanho do contexto inline.
 | 32 KB – 256 KB | tier medium da família Flash mais nova |
 | ≥ 256 KB | tier high da família Flash mais nova |
 
-**Contrato testado:** com o fallback atual e contexto vazio, resolve para `gemini-3.7-flash-low`; novos catálogos avançam automaticamente a família.
+**Contrato testado:** com o fallback atual e contexto vazio, resolve para `gemini-3.8-flash-low`; novos catálogos avançam automaticamente a família.
 
 ---
 
-## UC08 — Tarefa longa com heartbeat
+## UC08 — Tarefa longa sem teto de tempo (watchdog)
 
-Análises exaustivas que levam mais tempo que o timeout padrão por linha de output.
+Análises exaustivas que podem levar mais de 10 minutos.
 
 ```
-/cc-antigravity-plugin:antigravity --timeout 15m \
+/cc-antigravity-plugin:antigravity --stall-timeout 30m --output-file /tmp/agy-analise.txt \
   "Analise todos os arquivos em scripts/ e tests/. Para cada função exportada, descreva o que ela faz, seus parâmetros e valor de retorno."
 ```
 
-**Comportamento:** o timer de 15 min reseta a cada chunk de output — a tarefa só expira se o AGY ficar completamente silencioso por 15 minutos consecutivos.
+**Comportamento (AGY 1.5.0+):** sem `--timeout` não há teto. O AGY espera o turno e as tarefas em background terminarem, e o bridge só encerra a execução (exit 12) se o AGY passar 30 minutos sem emitir nenhum evento de progresso. O padrão desse watchdog é 15 minutos. Para um teto rígido, use `--timeout 1h`. No Claude Code, a ferramenta Bash encerra comandos após 2 minutos por padrão (10 no máximo), então rode a chamada com `run_in_background: true` e leia o `--output-file` depois. Em AGY anterior a 1.5.0, o bridge mantém o teto legado de 10 minutos.
 
 ---
 
@@ -148,7 +148,7 @@ Ver o comando `agy` que seria executado, sem gastar cota.
 
 **Útil para:** depuração, verificar quais arquivos serão injetados no contexto, confirmar flags antes de uma tarefa longa.
 
-**O que aparece no output:** `--model gemini-3.7-flash-high`, `--output-format json`, `--disable-slash-commands`, `--add-dir <cwd>`, `--dangerously-skip-permissions`, `--print`, `--print-timeout 5m` e o prompt completo.
+**O que aparece no output:** `--model gemini-3.7-flash-high`, `--output-format json`, `--disable-slash-commands`, `--add-dir <cwd>`, a estratégia de permissão resolvida para o AGY instalado (`--mode auto` onde disponível, senão `--dangerously-skip-permissions`), `--print`, `--print-timeout 5m` e o prompt completo. Sem `--timeout`, no AGY 1.5.0+, o comando mostra `--output-format stream-json` (fluxo interno do watchdog) e nenhum `--print-timeout`.
 
 > O bridge usa as flags nativas da CLI e nunca toca no `settings.json` global do usuário.
 

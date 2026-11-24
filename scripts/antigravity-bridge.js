@@ -4,12 +4,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
 import { createHash, randomUUID } from "node:crypto";
 import { resolveDefaultLogPath, logEvent } from "./utils.js";
-import { compareVersions } from "./check-agy.js";
+import { compareVersions, RECOMMENDED_AGY_VERSION } from "./check-agy.js";
 
 const DEFAULT_MAX_FILES = 40;
 const DEFAULT_MAX_FILE_BYTES = 32_768;
@@ -139,7 +140,24 @@ const QUOTA_PATTERNS = [
   /\b429\b/,
   /too many requests/i,
   /daily.*limit/i,
+  // AGY 1.5.10+: hard spend/billing limits stop the turn instead of retrying.
+  /spend.?cap/i,
+  /prepaid.*balance/i,
+  /weekly.*(?:quota|limit)/i,
 ];
+
+// AGY 1.5.16 does not fail when Auto mode is unavailable for the signed-in
+// account: it prints this warning on stderr ~0.5s after launch, before any
+// stream event, and continues in the default (ask-before-acting) mode, where
+// headless runs auto-deny every permission request. The first pattern is the
+// verbatim 1.5.16 text; the others are conservative variants.
+export const AUTO_UNAVAILABLE_PATTERNS = [
+  /--mode auto is not available/i,
+  /\bauto mode (?:is )?(?:not available|unavailable|not supported|not enabled)/i,
+  /\bagent mode auto (?:is )?(?:not available|unavailable|not supported)/i,
+];
+
+const PRINT_TIMEOUT_STDERR_PATTERN = /^\s*\[agy\] print timeout after/m;
 
 const AUTH_PATTERNS = [
   /\bUNAUTHENTICATED\b/i,
@@ -182,8 +200,9 @@ Options:
                              Use \`auto\` to select a tier from the newest available Flash family.
   --effort <level>           Reasoning effort: low, medium, high, xhigh, or max (model-dependent).
   --mode <mode>              Permission mode: plan, accept-edits, or auto.
-                             auto requires AGY 1.3.5+ on Linux/macOS, disables the default
-                             permission bypass, and conflicts with --skip-permissions.
+                             auto requires AGY 1.3.5+ on Linux/macOS or AGY 1.4.4+ on
+                             Windows 11 24H2+, disables the permission bypass, and
+                             conflicts with --skip-permissions.
   --json-schema <value>      JSON Schema string or file path; root must have type object.
                              Implies --format json; invalid schemas fail before spawning AGY.
   --disable-slash-commands   Treat task text as data (default headless, except --read-only;
@@ -199,7 +218,12 @@ Options:
                              many subagents to spawn based on the task's independent subparts.
   --subagent-model <name>    Model the spawned subagents should use. Conveyed via the prompt (AGY has
                              no per-subagent CLI flag). Implies --parallel. Defaults to the main model.
-  --timeout <duration>       Forwarded to agy as --print-timeout (for example: 3m, 300s).
+  --timeout <duration>       Hard ceiling forwarded to agy as --print-timeout (for example: 3m,
+                             300s). Default: none — with AGY 1.5.0+ the run waits until the
+                             turn and its background work finish, guarded by --stall-timeout.
+                             0 also means none. AGY < 1.5.0 keeps the legacy 10-minute ceiling.
+  --stall-timeout <duration> Unlimited runs only: stop agy (exit 12) after this long without
+                             any stream event. Default: 15m. 0 disables the watchdog.
   --interactive              Use agy --prompt-interactive instead of --print.
                              Requires PTY support and an interactive terminal (TTY).
                              With --generate-image, accepted as a compatibility hint and
@@ -208,9 +232,9 @@ Options:
   --read-only                Imply --mode plan, disable --dangerously-skip-permissions, and
                              disable workspace auto-add.
   --continue, -c             Continue the most recent AGY conversation.
-  --conversation <id>        Resume a specific AGY conversation.
+  --conversation <id>        Resume a specific AGY conversation. Aliases: -r, --resume.
   --sandbox                  Enable AGY sandbox mode.
-  --skip-permissions         Explicitly forward --dangerously-skip-permissions (on by default).
+  --skip-permissions         Explicitly forward --dangerously-skip-permissions.
   --max-files <n>            Maximum --dirs/--files files to inline (--design-system core
                              files are exempt). Default: 40.
   --max-file-bytes <n>       Maximum bytes per --dirs/--files file. Default: 32768.
@@ -233,16 +257,21 @@ Options:
   -h, --help                 Show this help message.
 
 Defaults:
-  Agentic mode is ON by default: --dangerously-skip-permissions is forwarded and the current
-  working directory is added to AGY's workspace via --add-dir. Pass --read-only to disable.
+  Agentic mode is ON by default and the current working directory is added to AGY's
+  workspace via --add-dir. Permissions: without --mode/--skip-permissions/--read-only the
+  bridge uses Auto mode (--mode auto, no bypass) where AGY offers it (AGY 1.3.5+ on
+  Linux/macOS, AGY 1.4.4+ on Windows 11 24H2+). If AGY reports Auto as unavailable for
+  the account before any step runs, the bridge retries once with
+  --dangerously-skip-permissions and remembers that for 24h. Elsewhere it forwards
+  --dangerously-skip-permissions as before. Pass --read-only to disable writes.
 
 Exit codes:
    0  Success
    1  Generic error       — also EMPTY_RESPONSE well within the timeout window
   10  QUOTA_EXAUSTED  — quota or rate limit hit; workflow should retry or pause
   11  AUTH_REQUIRED   — AGY needs interactive sign-in (run \`agy\` once)
-  12  TIMEOUT         — AGY did not respond within the configured timeout,
-                        including EMPTY_RESPONSE close to the effective timeout
+  12  TIMEOUT         — --timeout expired (AGY print_timeout), the stall watchdog fired,
+                        or EMPTY_RESPONSE close to a finite timeout
   13  AGY_MISSING     — Antigravity CLI not found on PATH
 
   EMPTY_RESPONSE: an empty response and exit 0 from agy is never treated as
@@ -282,12 +311,14 @@ function summarizeParsedArgs(parsed) {
     jsonSchema: parsed.jsonSchema,
     disableSlashCommands: parsed.disableSlashCommands,
     timeout: parsed.timeout,
+    stallTimeout: parsed.stallTimeout,
     interactive: parsed.interactive,
     readOnly: parsed.readOnly,
     continueConversation: parsed.continueConversation,
     conversationId: parsed.conversationId,
     sandbox: parsed.sandbox,
     skipPermissions: parsed.skipPermissions,
+    explicitSkipPermissions: parsed.explicitSkipPermissions,
     maxFiles: parsed.maxFiles,
     maxFileBytes: parsed.maxFileBytes,
     printCommand: parsed.printCommand,
@@ -401,6 +432,9 @@ export function parseAgyJsonResult(stdout) {
     durationSeconds: envelope.duration_seconds ?? 0,
     numTurns: envelope.num_turns ?? 0,
     usage: envelope.usage ?? undefined,
+    // AGY 1.4.11+: present only when the turn ended early
+    // (print_timeout | interrupted | error); omitted on normal completion.
+    finishedReason: envelope.finished_reason ?? "",
   };
 }
 
@@ -453,10 +487,27 @@ export function classifyAgyOutput(output, { format = "text", exitCode, stderr = 
   const failed = exitCode != null ? Number(exitCode) !== 0
     : envelope && String(envelope.status).toUpperCase() !== "SUCCESS";
   const agyError = failed ? parseAgyError(stderr) : null;
+  const finishedReason = String(envelope?.finishedReason ?? envelope?.finished_reason ?? "").toLowerCase();
+  // AGY 1.5.0+: a --print-timeout that cuts the turn exits 3 with
+  // finished_reason "print_timeout", an AGY_ERROR {"reason":"print_timeout"},
+  // and "[agy] print timeout after ..." on stderr. Any one of them is enough;
+  // exit 3 alone is not (AGY uses it for other failures too).
+  const printTimedOut = finishedReason === "print_timeout"
+    || String(agyError?.reason ?? "").toLowerCase() === "print_timeout"
+    || (failed && PRINT_TIMEOUT_STDERR_PATTERN.test(String(stderr ?? "")));
+  if (printTimedOut) {
+    const reason = String(agyError?.short_error || agyError?.message || envelope?.error
+      || "agy print timeout: the turn was still in progress; the response is partial");
+    return { type: "TIMEOUT", reason, exitCode: EXIT_TIMEOUT, agyError: agyError ?? undefined };
+  }
+  if (finishedReason === "interrupted") {
+    const reason = String(agyError?.short_error || agyError?.message || envelope?.error || "agy turn was interrupted");
+    return { type: "INTERRUPTED", reason, exitCode: EXIT_ERROR, agyError: agyError ?? undefined };
+  }
   if (agyError) {
     const status = String(agyError.status ?? "").toUpperCase();
     const code = String(agyError.code ?? "").toUpperCase();
-    const reason = String(agyError.message ?? envelope?.error ?? status);
+    const reason = String(agyError.message ?? agyError.short_error ?? envelope?.error ?? status);
     let type = "AGY_ERROR";
     let mappedExit = EXIT_ERROR;
     if ([status, code].some((s) => ["RESOURCE_EXHAUSTED", "QUOTA_EXHAUSTED", "429", "8"].includes(s))) {
@@ -470,7 +521,7 @@ export function classifyAgyOutput(output, { format = "text", exitCode, stderr = 
       mappedExit = EXIT_TIMEOUT;
     } else if (QUOTA_PATTERNS.some((p) => p.test(reason))) {
       type = "QUOTA_EXHAUSTED";
-      mappedExit = EXIT_QUOTA_EXHAUSTED;
+      mappedExit = EXIT_QUOTA_EXAUSTED;
     } else if (AUTH_PATTERNS.some((p) => p.test(reason))) {
       type = "AUTH_REQUIRED";
       mappedExit = EXIT_AUTH_REQUIRED;
@@ -505,11 +556,14 @@ function emitStructuredSignal(type, reason, model, result, _stdout, agyError) {
   const signal = { status: type, reason, model };
   if (result?.conversationId) signal.conversation_id = result.conversationId;
   if (result?.usage) signal.usage = result.usage;
-  if (agyError) {
-    signal.agy_error = agyError;
-    if (result?.response) signal.response = result.response;
+  if (result?.finishedReason) signal.finished_reason = result.finishedReason;
+  if (agyError) signal.agy_error = agyError;
+  // A partial response is preserved whenever the turn ended early, so callers
+  // can salvage it or resume the exact conversation.
+  if ((agyError || type === "TIMEOUT" || type === "INTERRUPTED") && result?.response) {
+    signal.response = result.response;
   }
-  if (type === "QUOTA_EXAUSTED") {
+  if (type === "QUOTA_EXAUSTED" || type === "QUOTA_EXHAUSTED") {
     signal.retry = result?.conversationId
       ? `--conversation ${result.conversationId}`
       : "--continue";
@@ -517,7 +571,7 @@ function emitStructuredSignal(type, reason, model, result, _stdout, agyError) {
   _stdout.write(JSON.stringify(signal) + "\n");
 }
 
-export function parseCliArgs(argv, { platform = process.platform } = {}) {
+export function parseCliArgs(argv) {
   const parsed = {
     dirs: [],
     addDirs: [],
@@ -536,12 +590,16 @@ export function parseCliArgs(argv, { platform = process.platform } = {}) {
     jsonSchema: undefined,
     disableSlashCommands: true,
     timeout: undefined,
+    stallTimeout: undefined,
     interactive: false,
     readOnly: false,
     continueConversation: false,
     conversationId: undefined,
     sandbox: false,
-    skipPermissions: true,   // agentic by default; --read-only disables
+    // Legacy default. mainImpl resolves the real strategy from the detected AGY
+    // version (Auto mode where available, see resolvePermissionStrategy).
+    skipPermissions: true,
+    explicitSkipPermissions: false,
     maxFiles: DEFAULT_MAX_FILES,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     printCommand: false,
@@ -629,6 +687,10 @@ export function parseCliArgs(argv, { platform = process.platform } = {}) {
         parsed.timeout = takeOptionValue(argv, index, token);
         index += 1;
         break;
+      case "--stall-timeout":
+        parsed.stallTimeout = takeOptionValue(argv, index, token);
+        index += 1;
+        break;
       case "--interactive":
         parsed.interactive = true;
         break;
@@ -682,6 +744,10 @@ export function parseCliArgs(argv, { platform = process.platform } = {}) {
         parsed.continueConversation = true;
         break;
       case "--conversation":
+      case "--resume":
+      case "-r":
+        // AGY 1.5.16 added -r/--resume; the bridge still forwards --conversation,
+        // which every supported AGY version understands.
         parsed.conversationId = takeOptionValue(argv, index, token);
         index += 1;
         break;
@@ -798,11 +864,11 @@ export function parseCliArgs(argv, { platform = process.platform } = {}) {
     if (sawSkipPermissionsFlag) {
       throw new Error("--mode auto cannot be combined with --skip-permissions: it bypasses Auto mode's command review.");
     }
-    if (platform === "win32") {
-      throw new Error("--mode auto requires Linux or macOS; AGY 1.4.0 does not support Auto mode on Windows.");
-    }
+    // Platform/version support is validated in mainImpl against the detected
+    // AGY version (resolveRuntimeCapabilities), not hard-coded here.
     parsed.skipPermissions = false;
   }
+  parsed.explicitSkipPermissions = sawSkipPermissionsFlag;
 
   if (!parsed.help && !parsed.task && parsed.agent) {
     throw new Error(
@@ -1195,14 +1261,15 @@ ${file.content.replaceAll("</", "<\\/")}
   const executionConstraints = readOnly
     ? `- You are a read-only analysis assistant. Analyze, inspect, and report without modifying files.
 - Do not call write_to_file, replace_file_content, multi_replace_file_content, or run_command.
-- Inspect the workspace only with available read-only search tools (such as code_search) and view_file.
-  Do not assume legacy grep_search, find_by_name, or list_dir tools are loaded. Headless read-only runs cannot
+- Inspect the workspace only with the read-only search and read tools loaded for this run (AGY 1.5.x
+  loads grep_search, find_by_name, list_dir, and view_file; some versions expose code_search instead).
+  Do not assume a tool exists if it is not in your toolset. Headless read-only runs cannot
   approve the "command" permission, so any run_command call is auto-denied and aborts the analysis
   with no output.`
     : `- You are an agentic coding assistant. Complete the task fully using your available tools.
 - Use write_to_file, replace_file_content, and multi_replace_file_content to create and edit files.
-- Use available search tools (such as code_search) and view_file to explore the workspace.
-- Do not assume legacy grep_search, find_by_name, or list_dir tools are loaded; use them only if available.
+- Use the available search tools (such as grep_search, find_by_name, or code_search) and view_file to explore the workspace.
+- Use only the tools actually loaded in your toolset.
 - Use run_command to execute shell commands when needed.`;
   const completionConstraint = readOnly
     ? "- Complete the entire analysis without stopping mid-way. Report findings and cited paths at the end."
@@ -1304,6 +1371,7 @@ export function buildAntigravityArgs({
   sandbox = false,
   skipPermissions = false,
   useStdin = false,
+  unlimitedTimeout = false,
 } = {}) {
   const args = [];
   if (mode === "auto" && skipPermissions) {
@@ -1329,9 +1397,14 @@ export function buildAntigravityArgs({
     if (!useStdin && prompt !== undefined) {
       args.push("--print", prompt);
     }
-    // Keep the bridge's explicit 10-minute budget across CLI versions: AGY
-    // 1.2.6 changed the native default from five minutes to unlimited (0).
-    args.push("--print-timeout", timeout || `${CONPTY_TIMEOUT_MS}ms`);
+    // Without an explicit ceiling, AGY 1.5.0+ waits for the turn and its
+    // non-daemon background work (`unlimitedTimeout`, chosen by mainImpl from
+    // the detected version). Older CLIs keep the explicit 10-minute budget:
+    // before 1.2.6 the native default was five minutes, and 1.2.6-1.4.x had a
+    // hidden 30-minute limit that ended the run with success.
+    if (timeout || !unlimitedTimeout) {
+      args.push("--print-timeout", timeout || `${CONPTY_TIMEOUT_MS}ms`);
+    }
   }
   return args;
 }
@@ -1472,10 +1545,14 @@ function modelVersion(slug) {
   if (dotted) return [Number(dotted[1]), Number(dotted[2])];
   const dashed = slug.match(/-(\d+)-(\d+)(?:-|$)/);
   if (dashed) return [Number(dashed[1]), Number(dashed[2])];
+  // Major-only generations such as gemini-4-neon-high (AGY 1.5.x). A token
+  // must be all digits, so gpt-oss-120b never reads as version 120.
+  const major = slug.match(/(?:^|-)(\d+)(?=-|$)/);
+  if (major) return [Number(major[1]), 0];
   return [0, 0];
 }
 
-function compareModelsNewestFirst(left, right) {
+export function compareModelsNewestFirst(left, right) {
   const [leftMajor, leftMinor] = modelVersion(left.slug);
   const [rightMajor, rightMinor] = modelVersion(right.slug);
   if (leftMajor !== rightMajor) return rightMajor - leftMajor;
@@ -1559,15 +1636,22 @@ export async function resolveModelCatalog({
   return FALLBACK_MODEL_CATALOG.map((model) => ({ ...model }));
 }
 
+const GEMINI_4_FAMILIES = ["argon", "carbon", "hydrogen", "neon"];
+
 function familyCandidates(normalized, catalog) {
   let family;
   if (normalized.includes("flash")) family = "flash";
+  // Checked before "pro": AGY 1.5.x slugs are gemini-pro-orchestrator[-argon|-neon].
+  else if (normalized.includes("orchestrator")) family = "orchestrator";
   // Matches "pro", "pro-high", "gemini-pro", and "gemini-pro-high" — i.e. "pro" as a
   // standalone token bounded by the string edges or a hyphen on either side. A plain
   // `.includes("-pro")` or `.includes("pro-")` alone missed the router's own
   // "pro-high"/"pro-low" aliases (adaptive-router.mjs AGY_MODELS), which start with
   // "pro-" but don't contain "-pro".
   else if (/(^|-)pro(-|$)/.test(normalized)) family = "pro";
+  else if (GEMINI_4_FAMILIES.some((name) => normalized.includes(name))) {
+    family = GEMINI_4_FAMILIES.find((name) => normalized.includes(name));
+  }
   else if (normalized.includes("opus") || normalized === "claude") family = "opus";
   else if (normalized.includes("sonnet")) family = "sonnet";
   else if (normalized === "gpt" || normalized.includes("gpt-oss")) family = "gpt-oss";
@@ -1631,6 +1715,111 @@ export function resolveAutoModel(context, catalog = FALLBACK_MODEL_CATALOG) {
   const tier = totalBytes < 32_768 ? "low" : totalBytes < 262_144 ? "medium" : "high";
   return newestFamily.find(({ slug }) => slug.endsWith(`-${tier}`))?.slug
     ?? newestFamily.sort(compareModelsNewestFirst)[0]?.slug;
+}
+
+export const AUTO_MODE_MIN_VERSION = "1.3.5";
+export const AUTO_MODE_WINDOWS_MIN_VERSION = "1.4.4";
+export const WINDOWS_AUTO_MIN_BUILD = 26_100; // Windows 11 24H2
+export const UNLIMITED_PRINT_MIN_VERSION = "1.5.0";
+export const DEFAULT_STALL_TIMEOUT = "15m";
+const TIMEOUT_GRACE_MS = 30_000;
+const CAPABILITY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function windowsBuildNumber(osRelease) {
+  const match = String(osRelease ?? "").match(/^\d+\.\d+\.(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
+// What the installed CLI can do on this machine, decided from its version and
+// the OS alone. Account-level limits (Gemini Enterprise, no user namespaces)
+// are only discoverable at run time; see AUTO_UNAVAILABLE_PATTERNS.
+export function resolveRuntimeCapabilities({
+  version,
+  platform = process.platform,
+  osRelease = os.release(),
+} = {}) {
+  const atLeast = (minimum) => compareVersions(version ?? "", minimum) >= 0;
+  let autoAvailable = false;
+  let autoUnavailableReason;
+  if (platform === "win32") {
+    const build = windowsBuildNumber(osRelease);
+    if (!atLeast(AUTO_MODE_WINDOWS_MIN_VERSION)) {
+      autoUnavailableReason =
+        `--mode auto on Windows requires AGY ${AUTO_MODE_WINDOWS_MIN_VERSION} or newer (found ${version}). Run \`agy update\`.`;
+    } else if (build < WINDOWS_AUTO_MIN_BUILD) {
+      autoUnavailableReason =
+        `--mode auto on Windows requires Windows 11 24H2 (build ${WINDOWS_AUTO_MIN_BUILD}) or newer; this is build ${build || "unknown"}.`;
+    } else {
+      autoAvailable = true;
+    }
+  } else if (platform === "linux" || platform === "darwin") {
+    if (atLeast(AUTO_MODE_MIN_VERSION)) autoAvailable = true;
+    else autoUnavailableReason = `--mode auto requires AGY ${AUTO_MODE_MIN_VERSION} or newer. Run \`agy update\`.`;
+  } else {
+    autoUnavailableReason = `--mode auto is not supported by AGY on ${platform}.`;
+  }
+  return {
+    version,
+    platform,
+    autoAvailable,
+    autoUnavailableReason,
+    nativeUnlimitedTimeout: atLeast(UNLIMITED_PRINT_MIN_VERSION),
+  };
+}
+
+// Explicit flags always win. Otherwise Auto mode (no bypass) where the CLI
+// offers it, falling back to the legacy permission bypass. Image generation and
+// --interactive keep the bypass: neither has the one-shot startup fallback.
+export function resolvePermissionStrategy(parsed, capabilities = {}, { autoKnownUnavailable = false } = {}) {
+  if (parsed.readOnly) return { strategy: "read-only", mode: parsed.mode, skipPermissions: false };
+  if (parsed.explicitSkipPermissions) {
+    return { strategy: "bypass-explicit", mode: parsed.mode, skipPermissions: true };
+  }
+  if (parsed.mode) {
+    return {
+      strategy: "mode-explicit",
+      mode: parsed.mode,
+      skipPermissions: parsed.mode === "auto" ? false : parsed.skipPermissions,
+    };
+  }
+  if (capabilities.autoAvailable && !autoKnownUnavailable && !parsed.generateImagem && !parsed.interactive) {
+    return { strategy: "auto-default", mode: "auto", skipPermissions: false };
+  }
+  return { strategy: "bypass-default", mode: undefined, skipPermissions: true };
+}
+
+export function resolveCapabilityCachePath() {
+  const home = process.env.USERPROFILE ?? process.env.HOME;
+  if (home) {
+    return path.join(home, ".gemini", "antigravity-cli", "cache", "cc-antigravity-capabilities.json");
+  }
+  return path.join(path.dirname(resolveDefaultLogPath()), "capabilities-cache.json");
+}
+
+// Remembers, per AGY version, that Auto mode was refused for this account so
+// later runs skip the doomed first attempt. Best effort: any I/O error means
+// "unknown", which only costs one extra short-lived spawn.
+export function readAutoUnavailable(cachePath, version, now = Date.now()) {
+  try {
+    const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    const entry = cached?.autoUnavailable;
+    return Boolean(entry && entry.version === version && Number.isFinite(entry.at)
+      && now - entry.at < CAPABILITY_CACHE_TTL_MS);
+  } catch {
+    return false;
+  }
+}
+
+export function writeAutoUnavailable(cachePath, version, now = Date.now()) {
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify({ autoUnavailable: { version, at: now } }, null, 2), "utf8");
+  } catch (error) {
+    logEvent("bridge.capabilities.cache.write_failed", {
+      cachePath,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export function checkAgyConnectivity(agyExe, _spawnSync = spawnSync) {
@@ -1879,6 +2068,15 @@ export async function spawnHeadless(
     onStart = undefined,
     prompt = undefined,
     useStdin = false,
+    // "silence": legacy timer reset by any output. "stall": the unlimited-mode
+    // watchdog over the internal stream-json feed. 0/undefined arms no timer.
+    timeoutKind = "silence",
+    // false when the bridge requested stream-json internally: progress goes to
+    // the log only, never to the caller's stderr.
+    progressToStderr = true,
+    // Kills the run as soon as stderr matches, provided no agent step ran yet
+    // (used for the implicit Auto-mode fallback).
+    abortOnStderr = undefined,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -1908,29 +2106,49 @@ export async function spawnHeadless(
 
     const stdoutChunks = [];
     const stderrChunks = [];
+    let stepsSeen = 0;
+    let aborted;
     const streamParser = format === "stream-json"
       ? createAgyStreamParser({
-          onProgress: (line) => _stderr.write(line + "\n"),
+          onProgress: (line) => {
+            if (progressToStderr) _stderr.write(line + "\n");
+            else if (shouldLogAgyOutput()) logEvent("agy.stream.progress", { line });
+          },
+          onEvent: (event) => {
+            const stepType = event?.step_update?.step_type;
+            if (event?.event === "step_update" && stepType !== "user_input") stepsSeen += 1;
+          },
         })
       : null;
     let settled = false;
+    let timer;
     const finish = (fn) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       fn();
     };
+    const armed = Number.isFinite(timeoutMs) && timeoutMs > 0;
     const timeoutError = () => {
-      killProcessTree(child.pid, () => child.kill());
-      const error = new Error(
-        `agy did not respond within ${timeoutMs / 1000}s.\n` +
-        "Check authentication (run `agy` once interactively) and network connectivity.",
-      );
+      const error = timeoutKind === "stall"
+        ? new Error(
+          `agy produced no stream events for ${timeoutMs / 1000}s (stall watchdog).\n` +
+          "Raise --stall-timeout (or 0 to disable) if the task legitimately waits that long.",
+        )
+        : new Error(
+          `agy did not respond within ${timeoutMs / 1000}s.\n` +
+          "Check authentication (run `agy` once interactively) and network connectivity.",
+        );
       error.code = "ETIMEDOUT";
+      error.timeoutKind = timeoutKind;
+      // Settle before killing: the child's "close" must not win the race and
+      // turn a timeout into an ordinary non-zero exit.
       finish(() => reject(error));
+      killProcessTree(child.pid, () => child.kill());
     };
-    let timer = setTimeout(timeoutError, timeoutMs);
+    if (armed) timer = setTimeout(timeoutError, timeoutMs);
     const heartbeat = () => {
+      if (!armed || settled) return;
       clearTimeout(timer);
       timer = setTimeout(timeoutError, timeoutMs);
     };
@@ -1944,8 +2162,8 @@ export async function spawnHeadless(
         try {
           streamParser.push(text);
         } catch (error) {
-          killProcessTree(child.pid, () => child.kill());
           finish(() => reject(error));
+          killProcessTree(child.pid, () => child.kill());
         }
       } else if (format === "text" && !suppressOutput) {
         _stdout.write(text);
@@ -1956,6 +2174,21 @@ export async function spawnHeadless(
       const text = chunk.toString("utf8");
       stderrChunks.push(text);
       _stderr.write(text);
+      if (abortOnStderr && !aborted && !settled && stepsSeen === 0) {
+        const stderrText = stderrChunks.join("");
+        if (abortOnStderr.some((pattern) => pattern.test(stderrText))) {
+          aborted = "auto-unavailable";
+          finish(() => resolve({
+            exitCode: null,
+            stdout: stdoutChunks.join(""),
+            stderr: stderrText,
+            result: undefined,
+            aborted,
+            stepsSeen,
+          }));
+          killProcessTree(child.pid, () => child.kill());
+        }
+      }
     });
     child.on("error", (error) => finish(() => reject(error)));
     child.on("close", (exitCode) => {
@@ -1972,6 +2205,7 @@ export async function spawnHeadless(
           stdout: stdoutChunks.join(""),
           stderr: stderrChunks.join(""),
           result,
+          stepsSeen,
         });
       });
     });
@@ -2468,6 +2702,10 @@ async function mainImpl(argv = process.argv.slice(2), {
   _snapshotSessionImages = snapshotSessionImages,
   _brainBase = path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".gemini", "antigravity-cli", "brain"),
   _conPtyTimeoutMs = CONPTY_TIMEOUT_MS,
+  _timeoutGraceMs = TIMEOUT_GRACE_MS,
+  _platform = process.platform,
+  _osRelease = os.release(),
+  _capabilityCachePath = resolveCapabilityCachePath(),
   _stdout = process.stdout,
   _stderr = process.stderr,
   _isTTY = Boolean(process.stdout.isTTY),
@@ -2664,7 +2902,9 @@ async function mainImpl(argv = process.argv.slice(2), {
       });
     }
 
-    const timeout = parsed.timeout ?? process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT;
+    // An explicit ceiling (flag or plugin option). "0" means no ceiling.
+    const rawTimeout = parsed.timeout ?? (process.env.CLAUDE_PLUGIN_OPTION_TIMEOUT?.trim() || undefined);
+    const timeout = rawTimeout !== undefined && parseTimeoutMs(rawTimeout) === 0 ? undefined : rawTimeout;
     let configuredEffort = process.env.CLAUDE_PLUGIN_OPTION_DEFAULT_EFFORT?.trim() || undefined;
     if (configuredEffort && !SUPPORTED_EFFORTS.has(configuredEffort)) {
       _stderr.write(
@@ -2673,13 +2913,83 @@ async function mainImpl(argv = process.argv.slice(2), {
       );
       configuredEffort = undefined;
     }
-    const agyFormat = parsed.generateImagem ? "stream-json" : parsed.format;
-    const agyArgs = buildAntigravityArgs({
+
+    // The installed version decides the permission and timeout defaults, so it
+    // is read before argv is built. --print-command still works without agy.
+    const agyExe = resolveAgyExe(_spawnSync);
+    let agyVersion;
+    let versionAssumed = false;
+    try {
+      agyVersion = checkAgyConnectivity(agyExe, _spawnSync);
+    } catch (error) {
+      if (!parsed.printCommand) throw error;
+      versionAssumed = true;
+      agyVersion = RECOMMENDED_AGY_VERSION;
+      const detail = (error instanceof Error ? error.message : String(error)).split("\n")[0];
+      _stderr.write(
+        `Warning: could not read the AGY version (${detail}); --print-command shows the AGY ${RECOMMENDED_AGY_VERSION} defaults.\n`,
+      );
+    }
+    const capabilities = resolveRuntimeCapabilities({
+      version: agyVersion,
+      platform: _platform,
+      osRelease: _osRelease,
+    });
+    if (!versionAssumed && parsed.mode === "auto" && !capabilities.autoAvailable) {
+      throw new Error(capabilities.autoUnavailableReason);
+    }
+    if (!versionAssumed && model && !modelCatalog.some(({ slug }) => slug === model)
+      && compareVersions(agyVersion, "1.3.4") < 0) {
+      throw new Error("Base --model slugs require AGY 1.3.4 or newer. Run `agy update` or select an explicit effort variant.");
+    }
+
+    // Timeout policy. Only ordinary headless runs become unlimited; image
+    // generation keeps its supervised total deadline and --interactive never
+    // sends --print-timeout.
+    const ordinaryHeadless = !imageHeadless && !parsed.interactive;
+    const unlimitedTimeout = ordinaryHeadless && !timeout && capabilities.nativeUnlimitedTimeout;
+    if (ordinaryHeadless && !timeout && !capabilities.nativeUnlimitedTimeout && !versionAssumed) {
+      _stderr.write(
+        `Warning: AGY ${agyVersion} predates ${UNLIMITED_PRINT_MIN_VERSION}; keeping the legacy 10-minute headless ` +
+          `ceiling. Run \`agy update\` (${RECOMMENDED_AGY_VERSION} recommended) for unlimited headless runs.\n`,
+      );
+    }
+    const rawStallTimeout = parsed.stallTimeout
+      ?? (process.env.CLAUDE_PLUGIN_OPTION_STALL_TIMEOUT?.trim() || DEFAULT_STALL_TIMEOUT);
+    const stallTimeoutMs = parseTimeoutMs(rawStallTimeout);
+    // The watchdog needs life signs, and a json/text run prints nothing until
+    // the end, so the bridge asks AGY for stream-json and rebuilds the caller's
+    // format from the final result event (AGY 1.5.16 also honors --json-schema
+    // there, as structured_output on the result).
+    const internalStream = unlimitedTimeout && stallTimeoutMs > 0 && parsed.format !== "stream-json";
+    const agyFormat = imageHeadless || internalStream ? "stream-json" : parsed.format;
+    const headlessTimeoutMs = unlimitedTimeout ? stallTimeoutMs
+      : timeout ? parseTimeoutMs(timeout) + _timeoutGraceMs
+        : _conPtyTimeoutMs;
+    const effectiveTimeoutMs = unlimitedTimeout ? null : timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs;
+
+    const autoKnownUnavailable = !versionAssumed && capabilities.autoAvailable
+      && readAutoUnavailable(_capabilityCachePath, agyVersion);
+    let permission = resolvePermissionStrategy(parsed, capabilities, { autoKnownUnavailable });
+    _diag.permission = permission.strategy;
+    logEvent("bridge.capabilities", {
+      agyVersion,
+      versionAssumed,
+      platform: capabilities.platform,
+      autoAvailable: capabilities.autoAvailable,
+      autoKnownUnavailable,
+      permission: permission.strategy,
+      unlimitedTimeout,
+      stallTimeoutMs: unlimitedTimeout ? stallTimeoutMs : null,
+      internalStream,
+    });
+
+    const buildArgsFor = (permissionStrategy) => buildAntigravityArgs({
       prompt,
       model,
       format: agyFormat,
       effort: parsed.effort ?? configuredEffort,
-      mode: parsed.mode,
+      mode: permissionStrategy.mode,
       agent: parsed.agent,
       jsonSchema,
       disableSlashCommands: parsed.disableSlashCommands,
@@ -2689,9 +2999,11 @@ async function mainImpl(argv = process.argv.slice(2), {
       conversationId: parsed.conversationId,
       addDirs: effectiveAddDirs,
       sandbox: parsed.sandbox,
-      skipPermissions: parsed.skipPermissions,
+      skipPermissions: permissionStrategy.skipPermissions,
       useStdin: shouldStreamStdin,
+      unlimitedTimeout,
     });
+    let agyArgs = buildArgsFor(permission);
     logEvent("bridge.agy.args.built", {
       args: summarizeAgyArgs(agyArgs),
       timeout,
@@ -2704,16 +3016,6 @@ async function mainImpl(argv = process.argv.slice(2), {
       printResolvedCommands(agyArgs, _stdout);
       logEvent("bridge.print-command", { args: summarizeAgyArgs(agyArgs) });
       return EXIT_SUCCESS;
-    }
-
-    const agyExe = resolveAgyExe(_spawnSync);
-    const agyVersion = checkAgyConnectivity(agyExe, _spawnSync);
-    if (parsed.mode === "auto" && compareVersions(agyVersion, "1.3.5") < 0) {
-      throw new Error("--mode auto requires AGY 1.3.5 or newer. Run `agy update`.");
-    }
-    if (model && !modelCatalog.some(({ slug }) => slug === model)
-      && compareVersions(agyVersion, "1.3.4") < 0) {
-      throw new Error("Base --model slugs require AGY 1.3.4 or newer. Run `agy update` or select an explicit effort variant.");
     }
 
     const spawnStartMs = Date.now();
@@ -2831,54 +3133,106 @@ async function mainImpl(argv = process.argv.slice(2), {
       return EXIT_SUCCESS;
     }
 
+    const runHeadless = (args, { abortOnStderr } = {}) => spawnHeadless(agyExe, args, {
+      format: agyFormat,
+      timeoutMs: headlessTimeoutMs,
+      timeoutKind: unlimitedTimeout ? "stall" : "silence",
+      progressToStderr: !internalStream,
+      abortOnStderr,
+      _spawn,
+      _stdout,
+      _stderr,
+      suppressOutput: Boolean(parsed.outputFile),
+      prompt,
+      useStdin: shouldStreamStdin,
+      onStart: ({ pid }) => appendRunJournal({
+        runId: _diag.runId,
+        status: "RUNNING",
+        pid,
+        executor: "agy",
+        permission: permission.strategy,
+        requestedConversationId: parsed.conversationId ?? null,
+      }),
+    });
+
     let headless;
     try {
-      headless = await spawnHeadless(agyExe, agyArgs, {
-        format: parsed.format,
-        timeoutMs: timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs,
-        _spawn,
-        _stdout,
-        _stderr,
-        suppressOutput: Boolean(parsed.outputFile),
-        prompt,
-        useStdin: shouldStreamStdin,
-        onStart: ({ pid }) => appendRunJournal({
-          runId: _diag.runId,
-          status: "RUNNING",
-          pid,
-          executor: "agy",
-          requestedConversationId: parsed.conversationId ?? null,
-        }),
+      headless = await runHeadless(agyArgs, {
+        abortOnStderr: permission.strategy === "auto-default" ? AUTO_UNAVAILABLE_PATTERNS : undefined,
       });
+      // AGY 1.5.16 keeps running in the default mode (auto-denying every
+      // permission in headless) when Auto is unavailable for the account; the
+      // bridge stops it at the warning, before any step, and retries once with
+      // the legacy bypass. Never after a step ran, never for explicit --mode auto.
+      const refusedAuto = permission.strategy === "auto-default" && (
+        headless.aborted === "auto-unavailable"
+        || (Number(headless.exitCode) !== 0 && !headless.stepsSeen
+          && AUTO_UNAVAILABLE_PATTERNS.some((pattern) => pattern.test(headless.stderr))));
+      if (refusedAuto) {
+        writeAutoUnavailable(_capabilityCachePath, agyVersion);
+        logEvent("bridge.permission.fallback", {
+          from: "auto-default",
+          to: "bypass-fallback",
+          agyVersion,
+          aborted: headless.aborted ?? null,
+          exitCode: headless.exitCode,
+        });
+        appendRunJournal({
+          runId: _diag.runId,
+          status: "RETRYING",
+          reason: "auto-unavailable",
+          permissionFallback: "bypass-fallback",
+        });
+        _stderr.write(
+          "Note: AGY reports Auto mode as unavailable for this account; retrying once with " +
+            "--dangerously-skip-permissions (remembered for 24h).\n",
+        );
+        permission = { strategy: "bypass-fallback", mode: undefined, skipPermissions: true };
+        _diag.permission = permission.strategy;
+        agyArgs = buildArgsFor(permission);
+        headless = await runHeadless(agyArgs);
+      }
     } catch (error) {
       if (error?.code === "ENOENT" || String(error).includes("not found")) {
         throw buildAgyMissingError();
+      }
+      if (error?.code === "ETIMEDOUT") {
+        const reason = String(error.message).split("\n")[0];
+        _diag.classified = "TIMEOUT";
+        emitStructuredSignal("TIMEOUT", reason, model, undefined, _stdout);
+        logEvent("bridge.classified", {
+          type: "TIMEOUT",
+          reason,
+          model,
+          timeoutKind: error.timeoutKind ?? null,
+          exitCode: EXIT_TIMEOUT,
+        });
       }
       throw error;
     }
 
     let result = headless.result;
-    let response = parsed.format === "text" ? headless.stdout : "";
+    let response = agyFormat === "text" ? headless.stdout : "";
     // A failed JSON parse most commonly means AGY never produced an envelope at
     // all — an auth/quota failure surfaced as plain text before it could. Defer
     // the throw until after classification has a chance to diagnose the real
     // cause from the raw text; only re-throw the parse error itself when
     // classification finds nothing (a genuinely malformed/unexpected envelope).
     let parseError = null;
-    if (parsed.format === "json" && headless.stdout.trim()) {
+    if (agyFormat === "json" && headless.stdout.trim()) {
       try {
         result = parseAgyJsonResult(headless.stdout);
         response = result.response;
       } catch (error) {
         parseError = error instanceof Error ? error : new Error(String(error));
       }
-    } else if (parsed.format === "stream-json") {
+    } else if (agyFormat === "stream-json") {
       response = result?.response ?? "";
     }
 
     const classification = classifyAgyOutput(
       result ?? `${headless.stdout}\n${headless.stderr}`,
-      { format: parsed.format, exitCode: headless.exitCode, stderr: headless.stderr },
+      { format: agyFormat, exitCode: headless.exitCode, stderr: headless.stderr },
     );
     if (!classification && parseError) {
       throw parseError;
@@ -2917,11 +3271,13 @@ async function mainImpl(argv = process.argv.slice(2), {
     // devolveu stdout vazio e exit 0 sem nenhum diagnostico. A checagem agora
     // vale para qualquer destino de saida.
     if (response.trim() === "" && String(headless.exitCode) === "0") {
-      const effectiveTimeoutMs = timeout ? parseTimeoutMs(timeout) : _conPtyTimeoutMs;
       const elapsedMs = Date.now() - spawnStartMs;
-      const nearTimeout = elapsedMs >= effectiveTimeoutMs * 0.8;
+      // Without a finite ceiling an empty response can never be "near the
+      // timeout": it is always a generic failure.
+      const nearTimeout = effectiveTimeoutMs !== null && elapsedMs >= effectiveTimeoutMs * 0.8;
       const emptyExitCode = nearTimeout ? EXIT_TIMEOUT : EXIT_ERROR;
-      const reason = `agy produced an empty response after ${elapsedMs}ms (timeout ${effectiveTimeoutMs}ms)`;
+      const reason = `agy produced an empty response after ${elapsedMs}ms (timeout ${
+        effectiveTimeoutMs === null ? "none" : `${effectiveTimeoutMs}ms`})`;
       _diag.classified = "EMPTY_RESPONSE";
       _diag.conversationId = result?.conversationId ?? null;
       emitStructuredSignal("EMPTY_RESPONSE", reason, model, result, _stdout);
@@ -2942,7 +3298,9 @@ async function mainImpl(argv = process.argv.slice(2), {
       _diag.outputBytes = response.length;
       logEvent("bridge.output.file", { path: resolvedOutputFile, bytes: response.length });
       _stdout.write(resolvedOutputFile + "\n");
-    } else if (parsed.format !== "text" && response) {
+    } else if ((parsed.format !== "text" || internalStream) && response) {
+      // text runs over the internal stream print nothing live, so the final
+      // response is written here exactly like json.
       _stdout.write(response);
       if (!response.endsWith("\n")) _stdout.write("\n");
     }
@@ -2986,6 +3344,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     conversationId: diag.conversationId ?? null,
     outputBytes: diag.outputBytes ?? null,
     classified: diag.classified ?? null,
+    permission: diag.permission ?? null,
     imageCount: diag.imageReceipt?.count ?? null,
     imageDestination: diag.imageReceipt?.images?.[0]?.destination ?? null,
     imageTermination: diag.imageTermination ?? null,
@@ -2999,6 +3358,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     model: diag.model ?? null,
     conversationId: diag.conversationId ?? null,
     classified: diag.classified ?? null,
+    permission: diag.permission ?? null,
     imageCount: diag.imageReceipt?.count ?? null,
     imageDestination: diag.imageReceipt?.images?.[0]?.destination ?? null,
   });

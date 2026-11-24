@@ -41,10 +41,53 @@ O Claude pode chamar `agy` diretamente via Bash (`agy --print "task" --dangerous
 
 **Resumo:** para workflows automatizados, skills e tarefas de codificação onde o comportamento agêntico consistente é necessário, o bridge é a escolha correta. Para invocações ad-hoc simples, o `agy` bruto é suficiente.
 
+## Suporte ao AGY CLI 1.5 (plugin 4.7.0)
+
+Revisado contra as releases oficiais até o AGY 1.5.16 (base continua 1.1.8; abaixo de
+1.5.0 o bridge mantém os padrões legados e avisa uma vez).
+
+- **Permissões: Auto mode por padrão.** Sem `--mode`, `--skip-permissions` ou
+  `--read-only`, o bridge usa `--mode auto` (sem bypass) onde o AGY oferece: AGY 1.3.5+
+  em Linux/macOS, AGY 1.4.4+ no Windows 11 24H2+ (build 26100). O AGY 1.5.16 não falha
+  quando o Auto está indisponível para a conta (Gemini Enterprise, Linux sem user
+  namespaces): ele avisa e continua no modo padrão, em que execuções headless negam toda
+  permissão. O bridge interrompe essa execução no aviso, antes de qualquer passo, refaz uma
+  única vez com `--dangerously-skip-permissions` e memoriza isso por 24h por versão do AGY.
+  Nos demais casos o bypass continua padrão; desde o AGY 1.5.2 ele ainda bloqueia comandos
+  da denylist do sistema. Flags explícitas sempre prevalecem, e `--mode auto` explícito
+  nunca cai para o bypass.
+- **Sem teto de tempo por padrão.** No AGY 1.5.0+, o headless sem `--print-timeout` espera
+  o turno e as tarefas em background/subagents não-daemon terminarem, então o bridge não
+  envia mais esse limite. Um watchdog de travamento (`--stall-timeout`, padrão `15m`, `0`
+  desliga) encerra execuções sem nenhum evento de progresso: o bridge lê o `stream-json`
+  do AGY internamente (inclusive com `--json-schema`) e remonta a saída `json`/`text`
+  pedida sem alteração. `--timeout <duração>` é um teto rígido; o bridge espera 30
+  segundos a mais que o AGY para que ele reporte o turno parcial primeiro.
+- **A ferramenta Bash do Claude Code** encerra comandos após 2 minutos por padrão (10 no
+  máximo). Rode tarefas longas com `run_in_background: true` e `--output-file <caminho>`.
+- **Classificação de término antecipado.** `finished_reason: "print_timeout"` (AGY
+  1.4.11+), a linha `[agy] print timeout after ...` no stderr ou um `AGY_ERROR` com
+  `"reason":"print_timeout"` viram exit 12 e preservam a `response` parcial, o ID da
+  conversa e `finished_reason` no sinal. `interrupted` é falha (exit 1). As paradas do
+  AGY 1.5.10 por spend cap, saldo pré-pago e cota semanal viram exit 10.
+- **`-r` / `--resume <id>`** (AGY 1.5.16) são aceitos e repassados como `--conversation`.
+- **Modelos Gemini 4.** Slugs `gemini-4-<família>-<tier>` são ordenados como a geração
+  mais nova e resolvem por família (`--model hydrogen`, `neon`, `argon`, `carbon high`),
+  além de `--model orchestrator` (`orchestrator neon`/`argon` escolhem o planner). O
+  catálogo de emergência não mudou; o catálogo runtime de `agy models` continua autoritativo.
+- **Ferramentas de busca.** O AGY 1.5.16 carrega `grep_search`, `find_by_name`, `list_dir`
+  e `view_file`; os prompts deixam de apontar para `code_search`.
+- O AGY 1.5.16 descobre skills multi-ferramenta em `~/.agents/skills`, e `agy plugin
+  import` converte plugins Claude Code. Este plugin delega trabalho ao AGY, então continue
+  usando-o a partir do Claude Code: dentro do AGY ele delegaria o AGY para si mesmo.
+- Correção: um `AGY_ERROR` com status não mapeado e mensagem de cota lançava
+  `ReferenceError` (exit 1) em vez de sair com 10.
+
 ## Suporte ao AGY CLI 1.4 (plugin 4.6.0)
 
-- `--mode auto` ativa a revisão de comandos do AGY em Linux/macOS (AGY 1.3.5+).
-  Desativa o bypass de permissões padrão do plugin e rejeita `--skip-permissions`.
+- `--mode auto` ativa a revisão de comandos do AGY em Linux/macOS (AGY 1.3.5+; Windows 11
+  24H2+ com AGY 1.4.4+ desde o plugin 4.7.0). Desativa o bypass de permissões e rejeita
+  `--skip-permissions`.
   Execuções headless não respondem a aprovações; use `--interactive` para revisão manual.
 - `--effort` também aceita `xhigh` e `max`, quando disponíveis no modelo escolhido.
 - Slugs base exatos, como `--model gemini-3.8-flash`, preservam o esforço padrão
@@ -58,11 +101,11 @@ O Claude pode chamar `agy` diretamente via Bash (`agy --print "task" --dangerous
   Cota/autenticação/timeout mantêm saídas 10/11/12; outros erros estruturados saem
   com 1, preservando metadados em `agy_error` e a `response` parcial estruturada.
   Resposta parcial acompanhada de erro nunca é tratada como sucesso.
-- Os prompts usam ferramentas de busca disponíveis, como `code_search`; deixam
-  de pressupor `grep_search`, `find_by_name` e `list_dir` no conjunto padrão.
+- Os prompts usavam ferramentas de busca disponíveis, como `code_search` (substituído
+  na 4.7.0: o AGY 1.5.16 voltou a carregar `grep_search`, `find_by_name` e `list_dir`).
 
-O bridge mantém o timeout explícito de 10 minutos quando não há override; a opção
-`timeout` configurada no plugin também se aplica. O AGY 1.2.6+ usa ilimitado por
+Na 4.6.0 o bridge mantinha o timeout explícito de 10 minutos (desde a 4.7.0 ele vale só
+para AGY anterior a 1.5.0). O AGY 1.2.6+ usa ilimitado por
 conta própria. Desde o AGY 1.3.2, bypass de permissões não aprova automaticamente
 artefatos de planejamento; ajuste Artifact Review no AGY quando necessário.
 Atalhos do terminal, Remote Control, status OSC 7501 e gerenciamento do marketplace
@@ -87,7 +130,7 @@ A versão 4.0 requer AGY 1.1.8+ e realinha as flags do bridge com a CLI:
 ## Pré-requisitos
 
 - **Node.js 22+**
-- **Antigravity CLI 1.1.8+** instalado e autenticado (AGY 1.4.0 recomendado)
+- **Antigravity CLI 1.1.8+** instalado e autenticado (AGY 1.5.16 recomendado)
 
 ```bash
 # macOS / Linux
@@ -225,16 +268,17 @@ $antigravity-integration <tarefa>
 | `--model <name>` | Slug nativo ou alias resolvido via `agy models`; omitido por padrão para preservar o `/model` do usuário |
 | `--format <format>` | `text`, `json` ou `stream-json`; JSON é o padrão headless |
 | `--effort <level>` | `low`, `medium`, `high`, `xhigh` ou `max` (conforme o modelo); só quando pedido |
-| `--mode <mode>` | `plan`, `accept-edits` ou `auto` (AGY 1.3.5+, Linux/macOS); Auto desativa o bypass de permissões |
+| `--mode <mode>` | `plan`, `accept-edits` ou `auto` (AGY 1.3.5+ em Linux/macOS, 1.4.4+ no Windows 11 24H2+); Auto desativa o bypass de permissões |
 | `--agent <name>` | Seleciona um agente customizado; não é mais alias do modo interativo |
 | `--json-schema <value>` | JSON Schema com raiz objeto, inline ou arquivo; validado antes do AGY; implica JSON |
 | `--allow-slash-commands` | Reativa expansão de slash commands (desativada por padrão headless) |
 | `--parallel` | Permite que o AGY divida a tarefa entre múltiplos subagentes Gemini nativos (`DefineSubagent` / `invoke_subagent` / `ManageSubagents`). O próprio AGY decide quantos. Funciona no modo headless padrão. |
 | `--subagent-model <name>` | Modelo que os subagentes spawnados devem usar (transmitido via prompt — o AGY não tem flag de CLI por subagente). Ativa `--parallel` automaticamente. Padrão: o modelo da sessão principal. |
-| `--read-only` | Força `--mode plan`, desativa skip-permissions/auto-add do cwd e mantém slash expansion ativa porque o AGY 1.1.16 ignora plan mode caso contrário. O prompt restringe a inspeção a ferramentas de busca somente leitura disponíveis, como `code_search`, e `view_file`: execução headless não aprova a permissão `command`, então uma chamada `run_command` é negada automaticamente e aborta a análise (4.4.3) |
+| `--read-only` | Força `--mode plan`, desativa skip-permissions/auto-add do cwd e mantém slash expansion ativa porque o AGY 1.1.16 ignora plan mode caso contrário. O prompt restringe a inspeção às ferramentas de busca somente leitura carregadas pelo AGY (`grep_search`, `find_by_name`, `list_dir`, `view_file` no AGY 1.5.16): execução headless não aprova a permissão `command`, então uma chamada `run_command` é negada automaticamente e aborta a análise (4.4.3) |
 | `--continue`, `-c` | Continua a conversa mais recente do AGY |
-| `--conversation <id>` | Retoma uma conversa específica do AGY por ID |
-| `--timeout <duration>` | Repassa `--print-timeout` ao AGY (ex: `3m`, `300s`). O timer reseta a cada chunk de output. |
+| `--conversation <id>`, `-r`, `--resume` | Retoma uma conversa específica do AGY por ID |
+| `--timeout <duration>` | Teto rígido repassado como `--print-timeout` (ex: `30m`). Padrão: nenhum no AGY 1.5.0+ (`0` também significa nenhum); 10 minutos em CLIs anteriores. |
+| `--stall-timeout <duration>` | Execuções sem teto: encerra o AGY com exit 12 após esse tempo sem nenhum evento de progresso. Padrão `15m`; `0` desliga. Também `stall_timeout` na configuração do plugin. |
 | `--output-file <path>` | Grava a resposta final parseada em arquivo em vez de stdout |
 | `--task-file <path>`, `--prompt-file <path>` | Lê o texto da task de um arquivo em vez de argv. Protege o salto chamador→bridge do limite de linha de comando do SO. |
 | `--use-stdin`, `--stdin` | Força o envio do prompt ao AGY via stdin em vez de `--print <prompt>`. Automático para prompts headless acima de 8.191 chars no Windows e de 100.000 chars nas demais plataformas, então o contexto inline nunca é descartado por tamanho. `--interactive` sempre passa o prompt em argv; nesse caso, os arquivos inline de menor prioridade são descartados primeiro para caber no limite do Windows. |
@@ -253,17 +297,19 @@ divergente e uma proporção explícita fora da tolerância causam falha; um des
 existente com conteúdo diferente nunca é sobrescrito.
 | `--print-command` | Imprime o comando `agy` resolvido sem executar |
 
-**Padrões agênticos:** por padrão, `--dangerously-skip-permissions` é repassado e o cwd é adicionado ao workspace do AGY via `--add-dir`. Use `--read-only` para desativar.
+**Padrões agênticos:** o cwd é adicionado ao workspace do AGY via `--add-dir`, e o AGY age sem pedir confirmação — via Auto mode onde o AGY oferece, senão `--dangerously-skip-permissions` (veja "Suporte ao AGY CLI 1.5"). Use `--read-only` para desativar.
 
 **Trade-off do `--read-only`:** o AGY 1.1.16 ignora `--mode plan` enquanto a expansão de slash-command está desativada, então `--read-only` reativa essa expansão para preservar a garantia mais forte de não-escrita. Isso significa que a expansão de slash-command/skill roda justamente no caminho read-only — o mais usado para analisar conteúdo não confiável de repositório — onde uma execução headless normal a manteria desligada. Não há forma conhecida de neutralizar isso sem enfraquecer a própria garantia de não-escrita que o modo existe para proteger, pois é comportamento do AGY em si, não algo que o bridge interpreta. Prefira `--dirs`/`--add-dir` a colar conteúdo não confiável direto no texto da task ao rodar `--read-only` contra um repositório que você não controla.
 
 ## Modelos disponíveis
 
 O bridge descobre o catálogo atual com `agy models`, mantém cache por 24 horas e
-usa uma lista emergencial apenas quando a descoberta falha. As famílias atuais incluem
-`gemini-3.7-flash-*`, `gemini-3.6-flash-*`, `claude-opus-4-6-thinking`,
-`claude-sonnet-4-6` e `gpt-oss-*`. Aliases como `flash`, `opus` e `sonnet`
-resolvem para o membro runtime mais novo da família.
+usa uma lista emergencial apenas quando a descoberta falha. Com o AGY 1.5.16 o catálogo
+inclui `gemini-4-{hydrogen,neon}-{low,medium,high,xhigh}`,
+`gemini-4-{argon,carbon}-{low,medium,high}`, `gemini-pro-orchestrator[-argon|-neon]`,
+`gemini-3.8-flash-*`, `claude-{opus,sonnet}-5-5-*` e `gpt-oss-120b-medium` (a lista exata
+depende da conta). Aliases como `flash`, `opus`, `sonnet`, `hydrogen`, `neon`, `argon`,
+`carbon` e `orchestrator` resolvem para o membro runtime mais novo da família.
 
 **`--model auto` — limiares:**
 
@@ -311,12 +357,12 @@ O campo `retry` usa o ID exato da conversa quando o AGY o fornece; sem ID, usa `
 |---|---|---|
 | `0` | Sucesso | — |
 | `1` | Erro genérico | Verifique o log |
-| `10` | `QUOTA_EXAUSTED` | Aguarde reset; use o comando emitido em `retry` |
+| `10` | `QUOTA_EXAUSTED` | Aguarde reset; use o comando emitido em `retry` (inclui spend cap, saldo pré-pago e cota semanal) |
 | `11` | `AUTH_REQUIRED` | Execute `agy` uma vez interativamente |
-| `12` | `TIMEOUT` | Aumente `--timeout` ou reduza o escopo |
+| `12` | `TIMEOUT` | `--timeout` expirou (a `response` parcial é preservada) ou o watchdog disparou; aumente `--timeout`/`--stall-timeout` ou reduza o escopo |
 | `13` | `AGY_MISSING` | Instale o AGY |
 
-> **Heartbeat:** o timer de timeout reseta a cada chunk de output do AGY. Tarefas longas que produzem output contínuo não são canceladas — o timeout só dispara se o AGY ficar completamente silencioso pela duração especificada.
+> **Watchdog:** sem `--timeout` (AGY 1.5.0+), o timer reseta a cada evento de progresso do AGY e só dispara após `--stall-timeout` (15m) de silêncio. Com `--timeout`, o AGY aplica o teto e o timer do próprio bridge espera 30 segundos a mais para o AGY reportar o turno parcial.
 
 ## Testes
 

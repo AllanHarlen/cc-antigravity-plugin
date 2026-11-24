@@ -7,6 +7,10 @@ import { pathToFileURL } from "node:url";
 import { logEvent } from "./utils.js";
 
 export const MIN_AGY_VERSION = "1.1.8";
+export const RECOMMENDED_AGY_VERSION = "1.5.16";
+// Below this the bridge keeps its legacy defaults (10-minute headless ceiling,
+// permission bypass instead of Auto mode, no finished_reason).
+export const MODERN_AGY_VERSION = "1.5.0";
 
 export function compareVersions(left, right) {
   const parse = (value) => String(value).match(/\d+(?:\.\d+){0,2}/)?.[0]
@@ -64,6 +68,13 @@ export function checkAgy({ _spawnSync = spawnSync, _stderr = process.stderr } = 
     _stderr.write(
       `Warning: Antigravity CLI ${version} is older than the minimum supported version ` +
         `${MIN_AGY_VERSION}. Run \`agy update\` to enable structured headless output.\n`,
+    );
+  } else if (compareVersions(version, MODERN_AGY_VERSION) < 0) {
+    logEvent("agy.check.legacy", { agyPath, version, recommended: RECOMMENDED_AGY_VERSION });
+    _stderr.write(
+      `Warning: Antigravity CLI ${version} predates ${MODERN_AGY_VERSION}; cc-antigravity-plugin keeps its ` +
+        "legacy defaults (10-minute headless ceiling, permission bypass instead of Auto mode). " +
+        `Run \`agy update\` (${RECOMMENDED_AGY_VERSION} recommended).\n`,
     );
   }
   return { installed: true, supported, agyPath, version };
