@@ -36,6 +36,7 @@ import {
   resolveAutoModel,
   resolveModelCatalog,
   resolveModelAlias,
+  spawnHeadless,
   spawnImageHeadless,
   spawnViaConPty,
   stripAnsi,
@@ -1404,6 +1405,114 @@ test("parseAgyJsonResult normalizes the real JSON envelope and quota classificat
   assert.equal(result.conversationId, "6d4c3cf0-test");
   assert.equal(result.numTurns, 1);
   assert.equal(classifyAgyOutput(result, { format: "json" })?.type, "QUOTA_EXAUSTED");
+});
+
+test("renderStreamProgress dedupes ACTIVE/DONE tool steps and folds duration into one line", () => {
+  // AGY 1.5.x emits state:"ACTIVE" and state:"DONE" for the same step_index.
+  // The renderer prints the tool once (the ACTIVE line); the matching DONE is
+  // silent unless the step was slow (>= 5s), which earns a ⏱ duration line.
+  const progress = [];
+  const parser = createAgyStreamParser({ onProgress: (line) => progress.push(line) });
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"write_file","tool_info":{"name":"write_file","parameters":{"Path":"D:\\\\x.txt"}}}}\n');
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":2,"state":"DONE","step_type":"tool","tool_name":"write_file","duration_seconds":0.76,"tool_info":{"name":"write_file","parameters":{"Path":"D:\\\\x.txt"}}}}\n');
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":3,"state":"DONE","step_type":"tool","tool_name":"read_file","duration_seconds":2.51,"tool_info":{"name":"read_file","parameters":{"Path":"D:\\\\y.txt"}}}}\n');
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":4,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"npm test"}}}}\n');
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":4,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":42.3,"tool_info":{"name":"run_command","parameters":{"CommandLine":"npm test"}}}}\n');
+  parser.end();
+  // Fast pair (step 2): one ACTIVE line, silent DONE.
+  // Orphan DONE (step 3): prints its own plain line.
+  // Slow pair (step 4): one ACTIVE line + one ⏱ line.
+  const toolLines = progress.filter((l) => l.includes("tool"));
+  assert.equal(toolLines.length, 3, `expected 3 tool lines, got: ${JSON.stringify(progress)}`);
+  assert.match(toolLines[0], /tool write_file .*x\.txt/);
+  assert.doesNotMatch(toolLines[0], /done in/, "ACTIVE line must not carry a duration");
+  assert.match(toolLines[1], /tool read_file .*y\.txt/);
+  assert.doesNotMatch(toolLines[1], /done in|⏱/, "orphan fast DONE renders bare, without duration");
+  assert.match(toolLines[2], /tool run_command .*npm test/);
+  const slowLines = progress.filter((l) => l.includes("⏱"));
+  assert.equal(slowLines.length, 1, `expected exactly one slow-step line, got: ${JSON.stringify(progress)}`);
+  assert.match(slowLines[0], /⏱ run_command done in 42s/);
+  // No duplicate ACTIVE/DONE pair survived: every rendered line is unique.
+  assert.equal(new Set(progress).size, progress.length);
+});
+
+test("renderStreamProgress renders slow/thinking agent_response turns as 🧠 lines, silences the rest", () => {
+  // AGY 1.5.x thinking turns surface only as a DONE step_update carrying
+  // duration_seconds and usage.thinking_tokens — the thinking text itself
+  // never enters the headless event stream.
+  const progress = [];
+  const parser = createAgyStreamParser({ onProgress: (line) => progress.push(line) });
+  // Fast final-answer turn, no thinking: silent.
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"OK"}}\n');
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":1,"state":"DONE","step_type":"agent_response","duration_seconds":1.2,"text_delta":"\\n","usage":{"input_tokens":10,"output_tokens":5,"thinking_tokens":0,"total_tokens":15}}}\n');
+  // Silent thinking turn (tool-decision): slow, shows duration even without tokens.
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":2,"state":"DONE","step_type":"agent_response","duration_seconds":6.24,"usage":{"input_tokens":10,"output_tokens":0,"thinking_tokens":0,"total_tokens":10}}}\n');
+  // Thinking-heavy turn: shows both duration and token count.
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":3,"state":"DONE","step_type":"agent_response","duration_seconds":3.25,"usage":{"input_tokens":2338,"output_tokens":56,"thinking_tokens":719,"total_tokens":2394}}}\n');
+  parser.end();
+  const lines = progress.join("\n");
+  // The fast non-thinking turn must contribute no line: no 1.2s duration
+  // anywhere, and exactly two 🧠 lines — the slow one and the thinking one.
+  assert.doesNotMatch(lines, /1\.2s/, "fast non-thinking turn must stay silent");
+  assert.match(lines, /🧠 turn done \(6\.2s\)/);
+  assert.match(lines, /🧠 turn done \(3\.3s\) · 719 thinking tokens/);
+  const count = (lines.match(/🧠/g) || []).length;
+  assert.equal(count, 2, `expected 2 🧠 lines, got: ${JSON.stringify(progress)}`);
+});
+
+test("spawnHeadless prints a still-working heartbeat after stream silence and stops it on exit", async () => {
+  // A thinking turn emits no events while in flight (verified on AGY 1.5.16);
+  // the watcher must print liveness lines after silenceNoticeMs of quiet,
+  // stay quiet while chunks flow, and clean its timer up on close.
+  const stderr = [];
+  const write = (line) => { stderr.push(String(line)); return true; };
+  const child = new EventEmitter();
+  child.pid = 1234;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {};
+  const spawnFn = () => child;
+  // Start without awaiting: the promise only settles on close, so the chunks
+  // must be fed (and the silence window allowed to elapse) while it is open.
+  const resultPromise = spawnHeadless("agy", ["--output-format", "stream-json"], {
+    format: "stream-json",
+    timeoutMs: 1000,
+    silenceNoticeMs: 30,
+    _spawn: spawnFn,
+    _stderr: { write },
+  });
+  child.stdout.write('{"event":"step_update","step_update":{"conversation_id":"c","step_index":4,"state":"DONE","step_type":"agent_response","duration_seconds":6.2,"usage":{"thinking_tokens":500}}}\n');
+  child.stdout.write('{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"ok\\n","duration_seconds":1,"num_turns":1,"usage":{}}}\n');
+  // Silence window: at least one heartbeat must fire while the process sits
+  // quiet (exact count flaps on 30ms timer boundaries, so assert >= 1).
+  await new Promise((r) => setTimeout(r, 70));
+  child.emit("close", 0);
+  const result = await resultPromise;
+  const countBeats = () => stderr.filter((l) => l.includes("still working")).length;
+  const afterClose = countBeats();
+  assert.ok(afterClose >= 1, `expected at least one heartbeat line, got: ${JSON.stringify(stderr)}`);
+  // After close the watcher must be disarmed — one more full cycle of quiet
+  // must not produce another beat.
+  await new Promise((r) => setTimeout(r, 70));
+  assert.equal(countBeats(), afterClose, `heartbeat must stop after close, got: ${JSON.stringify(stderr)}`);
+  // spawnHeadless resolves {exitCode, stdout, stderr, result}; the parsed AGY
+  // final result (from the "result" stream event) lives under .result.
+  assert.match(result.result.response, /ok/);
+});
+
+test("renderStreamProgress renders AGY 1.5 subagent ACTIVE/DONE pair with role and id", () => {
+  // Real shapes captured from AGY 1.5.16: subagents[] with role on ACTIVE,
+  // conversation_id on DONE. Old code printed "subagent unknown" for these.
+  const progress = [];
+  const parser = createAgyStreamParser({ onProgress: (line) => progress.push(line) });
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":3,"state":"ACTIVE","step_type":"subagent","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"type_name":"research","role":"Test Directory Researcher","initial_prompt":"probe"}]}}}\n');
+  parser.push('{"event":"step_update","step_update":{"conversation_id":"c1","step_index":3,"state":"DONE","step_type":"subagent","tool_name":"invoke_subagent","duration_seconds":41.2,"subagent_info":{"subagents":[{"type_name":"research","role":"Test Directory Researcher","conversation_id":"d002185d-db57-496d-afc7-4a863192c544","log_uri":"file:///C:/x.jsonl"}]}}}\n');
+  parser.end();
+  const lines = progress.join("\n");
+  assert.match(lines, /subagent started: Test Directory Researcher/);
+  assert.match(lines, /subagent done: Test Directory Researcher \(d002185d\) \(41s\)/);
+  const count = (lines.match(/subagent/g) || []).length;
+  assert.equal(count, 2, `expected exactly 2 subagent lines (start + done), got: ${JSON.stringify(progress)}`);
 });
 
 test("createAgyStreamParser handles chunked NDJSON, progress, tools, subagents, and result", () => {

@@ -101,7 +101,11 @@ Use `--read-only` only when the task must not modify files.
 
 Headless execution uses a normal async child process and JSON by default, so stdout is
 reliable. For long or noisy responses, `--output-file <tmp-path>` remains available;
-use `--format stream-json` to expose tool/subagent progress on stderr.
+use `--format stream-json` to expose tool/subagent progress on stderr. In stream-json
+mode the bridge renders AGY 1.5 events one line per action (`[agy] tool …`, subagent
+start/done with role and id, `🧠 turn done` after slow thinking turns, and a
+`… still working` heartbeat every 30s of stream silence) — stderr progress is
+observability only; the parsed final result still reaches the caller unchanged.
 
 With AGY 1.5.0+ runs have no time ceiling (a 15-minute `--stall-timeout` watchdog stops
 silent runs). The Bash tool stops commands after 2 minutes by default (10 at most): for

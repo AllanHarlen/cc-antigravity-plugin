@@ -1990,11 +1990,105 @@ export async function spawnViaConPty(
   });
 }
 
+// Progress lines are keyed by (conversation_id, step_index): AGY 1.5.x emits
+// state:"ACTIVE" when a step starts and state:"DONE" when it finishes. The DONE
+// event repeats the same tool_info — rendering both printed every tool twice.
+// ACTIVE owns the one progress line per step; the matching DONE is silenced,
+// except for slow steps (>= SLOW_STEP_SECONDS) which earn a ⏱ duration line —
+// the only in-run signal that a long tool call finally returned.
+const SLOW_STEP_SECONDS = 5;
+const seenSteps = new Set();
+
+function renderSubagentEntries(subagentInfo) {
+  // AGY 1.5.x carries a subagents[] array (role/type_name on ACTIVE,
+  // conversation_id/log_uri on DONE); older shapes put a single
+  // conversation_id directly on subagent_info.
+  const entries = Array.isArray(subagentInfo?.subagents)
+    ? subagentInfo.subagents
+    : [subagentInfo];
+  return entries
+    .map((entry) => {
+      const role = entry?.role ?? entry?.type_name ?? null;
+      const id = entry?.conversation_id ?? null;
+      if (role && id) return `${role} (${String(id).slice(0, 8)})`;
+      if (role) return role;
+      return id ?? "unknown";
+    })
+    .join(", ");
+}
+
+function stepDurationSuffix(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "";
+  const shown = seconds < 10 ? seconds.toFixed(1) : Math.round(seconds);
+  return ` (${shown}s)`;
+}
+
 function renderStreamProgress(event) {
   const payload = event.step_update ?? event;
   if (event.event === "init") {
     const conversationId = event.conversation_id ?? event.init?.conversation_id;
     return conversationId ? `[agy] conversation ${conversationId} started` : "[agy] run started";
+  }
+
+  if (event.event === "step_update") {
+    const state = payload.state ?? "";
+    const stepType = payload.step_type ?? "";
+
+    if (stepType === "tool") {
+      const toolInfo = payload.tool_info;
+      const name = toolInfo?.name ?? payload.tool_name ?? "tool";
+      const parameters = toolInfo?.parameters && Object.keys(toolInfo.parameters).length > 0
+        ? ` ${JSON.stringify(toolInfo.parameters)}`
+        : "";
+      const stepKey = stepKeyOf(payload);
+      if (state === "ACTIVE") {
+        if (stepKey !== null) seenSteps.add(stepKey);
+        return `[agy] tool ${name}${parameters}`;
+      }
+      if (state === "DONE") {
+        const hadStartLine = stepKey === null ? false : seenSteps.delete(stepKey);
+        // A DONE with no rendered start (e.g. joining a resumed conversation
+        // mid-step) still prints its own full line.
+        if (!hadStartLine) return `[agy] tool ${name}${parameters}`;
+        const seconds = payload.duration_seconds;
+        if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= SLOW_STEP_SECONDS) {
+          const shown = seconds < 10 ? seconds.toFixed(1) : Math.round(seconds);
+          return `[agy] ⏱ ${name} done in ${shown}s`;
+        }
+        return null;
+      }
+      return null;
+    }
+
+    if (stepType === "subagent") {
+      const desc = renderSubagentEntries(payload.subagent_info);
+      if (state === "ACTIVE") return `[agy] subagent started: ${desc}`;
+      if (state === "DONE") {
+        return `[agy] subagent done: ${desc}${stepDurationSuffix(payload.duration_seconds)}`;
+      }
+      return null;
+    }
+
+    if (stepType === "agent_response") {
+      // ACTIVE events carry text_delta chunks of the visible answer — they stay
+      // in the final result, not progress noise. The DONE event carries the
+      // turn's measured duration and thinking_tokens: thinking content itself
+      // never enters the headless stream, so the turn summary is the closest
+      // visible signal for "it was thinking". Sub-second turns without
+      // thinking stay silent to keep the stream high-signal.
+      if (state === "DONE") {
+        const seconds = payload.duration_seconds;
+        const thinkingTokens = payload.usage?.thinking_tokens;
+        const slow = typeof seconds === "number" && Number.isFinite(seconds) && seconds >= SLOW_STEP_SECONDS;
+        const thought =
+          typeof thinkingTokens === "number" && thinkingTokens > 0;
+        if (!slow && !thought) return null;
+        const suffix = stepDurationSuffix(seconds);
+        const thinking = thought ? ` · ${thinkingTokens} thinking tokens` : "";
+        return `[agy] 🧠 turn done${suffix}${thinking}`;
+      }
+      return null;
+    }
   }
 
   const toolInfo = payload.tool_info;
@@ -2008,12 +2102,17 @@ function renderStreamProgress(event) {
 
   const subagentInfo = payload.subagent_info;
   if (subagentInfo) {
-    const conversationId = subagentInfo.conversation_id ?? "unknown";
-    const logUri = subagentInfo.log_uri ? ` ${subagentInfo.log_uri}` : "";
-    return `[agy] subagent ${conversationId}${logUri}`;
+    // Legacy shape (no step_update wrapper): single line.
+    return `[agy] subagent ${renderSubagentEntries(subagentInfo)}`;
   }
 
   return null;
+}
+
+function stepKeyOf(payload) {
+  const conversationId = payload.conversation_id ?? "";
+  if (payload.step_index === undefined || payload.step_index === null) return null;
+  return `${conversationId}#${payload.step_index}`;
 }
 
 export function createAgyStreamParser({ onProgress = () => {}, onEvent = () => {} } = {}) {
@@ -2077,6 +2176,11 @@ export async function spawnHeadless(
     // Kills the run as soon as stderr matches, provided no agent step ran yet
     // (used for the implicit Auto-mode fallback).
     abortOnStderr = undefined,
+    // AGY thinking turns emit no events while in flight (verified on 1.5.16:
+    // state:"DONE" only). With progress on stderr this watcher prints a
+    // heartbeat after this much stream silence so a live terminal shows
+    // "still working" instead of nothing. 0 disables it.
+    silenceNoticeMs = 30_000,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -2126,6 +2230,7 @@ export async function spawnHeadless(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      stopSilenceWatch();
       fn();
     };
     const armed = Number.isFinite(timeoutMs) && timeoutMs > 0;
@@ -2153,8 +2258,31 @@ export async function spawnHeadless(
       timer = setTimeout(timeoutError, timeoutMs);
     };
 
+    // Silence watcher: thinking turns and long tool runs produce no stream
+    // events while in flight; emit a liveness line so an attached terminal can
+    // tell "quiet but alive" from "hung". Only meaningful when progress lines
+    // are actually being shown (progressToStderr).
+    let silenceTimer = null;
+    const stopSilenceWatch = () => {
+      if (silenceTimer !== null) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+    };
+    const armSilenceWatch = () => {
+      stopSilenceWatch();
+      if (!streamParser || !progressToStderr || !silenceNoticeMs) return;
+      silenceTimer = setTimeout(() => {
+        silenceTimer = null;
+        _stderr.write("[agy] … still working (no stream events during a thinking turn or long tool call)\n");
+        armSilenceWatch();
+      }, silenceNoticeMs);
+    };
+    armSilenceWatch();
+
     child.stdout?.on("data", (chunk) => {
       heartbeat();
+      armSilenceWatch();
       const text = chunk.toString("utf8");
       stdoutChunks.push(text);
       if (shouldLogAgyOutput()) logEvent("agy.output.chunk", { text });
